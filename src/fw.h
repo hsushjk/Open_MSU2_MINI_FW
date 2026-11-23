@@ -117,7 +117,7 @@ extern uint16_t usb_tx_len;
 extern uint8_t  cfg_selected;
 
 #ifndef FW_VER_MAJOR
-#define FW_VER_MAJOR  49u
+#define FW_VER_MAJOR  50u
 #endif
 #ifndef FW_VER_MINOR
 #define FW_VER_MINOR  0u

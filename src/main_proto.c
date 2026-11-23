@@ -88,14 +88,42 @@ static int16_t ball_top(void)  { return (int16_t)(ball_y5 / 5); }
 static int16_t ball_cx(void)   { return (int16_t)(ball_left() + BALL_SZ / 2); }
 static int16_t ball_cy(void)   { return (int16_t)(ball_top() + BALL_SZ / 2); }
 
+static uint32_t rng_state;
+
+/* 简单的 LCG：每次进待机都换一个起点/方向/颜色，不用真随机数发生器 */
+static uint32_t rng_next(void)
+{
+    rng_state = rng_state * 1103515245u + 12345u;
+    return (rng_state >> 16) & 0x7FFFu;
+}
+
 static void ball_reset(void)
 {
     uint8_t k;
+    int32_t x, y;
 
-    ball_x5 = 71 * 5; ball_y5 = 31 * 5;
-    ball_dx5 = 9; ball_dy5 = 6;
-    ball_col_idx = 0u;
-    ball_col = BALL_COLS[0];
+    /* 每次进待机都混一次新种子：触摸通道读数每次都不一样（基准在 3900 上下浮动），
+     * 再叠一个调用计数，保证同一块板子连续几次进待机也不会走同一条线。
+     * 这里刻意不用 SysTick —— 这颗片的 SysTick 分频/方向不可靠。 */
+    static uint32_t rng_calls;
+
+    rng_state ^= ((uint32_t)adc_read(9u) << 7);
+    rng_state ^= ((rng_calls++) * 2654435761u);
+    if (rng_state == 0u)
+        rng_state = 0x2545F491u;
+
+    /* 起点：离四边各留 10 像素，避免一出生就贴边 */
+    x = (int32_t)(rng_next() % (uint32_t)(SCR_W - BALL_SZ - 20)) + 10;
+    y = (int32_t)(rng_next() % (uint32_t)(SCR_H - BALL_SZ - 20)) + 10;
+    ball_x5 = x * 5;
+    ball_y5 = y * 5;
+
+    /* 方向：四个斜向里随机一个，速度仍是 1.8 / 1.2 像素每步（0.6 倍速） */
+    ball_dx5 = (int16_t)((rng_next() & 1u) ? 9 : -9);
+    ball_dy5 = (int16_t)((rng_next() & 1u) ? 6 : -6);
+
+    ball_col_idx = (uint8_t)(rng_next() % 6u);
+    ball_col = BALL_COLS[ball_col_idx];
     trail_n = 0u;
     trail_skip = 0u;
     drawn_valid = 0u;
