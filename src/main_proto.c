@@ -31,6 +31,9 @@ static uint8_t rle_n;
 
 static uint32_t frame_px;
 static uint8_t standby_mode = 1u;
+static uint8_t blink_first = 1u;      /* 待机画面还没画过 */
+static uint8_t blink_on = 1u;         /* 当前方块颜色 1=白 0=黄 */
+static uint32_t idle_ms;              /* 没收到任何字节的粗略毫秒数 */
 static uint32_t win_px;   /* 当前流的窗口像素数，用于整帧角标判定 */
 
 static void stage_flush(void)
@@ -303,6 +306,7 @@ int main(void)
             quiet = 0u;
             hello_tick = 0u;
             stall = 0u;
+            idle_ms = 0u;
         }
 
         /* 原始像素流中途断掉时放弃本段：否则剩下的字会被当成像素，
@@ -317,6 +321,33 @@ int main(void)
             }
         }
 
+        /* 上位机断开（或一直没发帧）超过 4 秒，就回到待机画面，
+         * 免得屏幕永远停在最后一帧上。计时用 delay_ms(1) 累加，
+         * 空闲时主循环本来也没事可做，阻塞 1 ms 不影响任何东西。 */
+        if (rx_len == 0 && raw_left == 0u) {
+            if (idle_ms < 6000u)
+                idle_ms++;
+        } else {
+            idle_ms = 0u;
+        }
+
+        if (standby_mode == 0u && idle_ms >= 4000u) {
+            uint32_t k;
+
+            standby_mode = 1u;
+            blink_first = 1u;
+            blink_on = 1u;
+            stage_len = 0u;
+            stage_idx = 0u;
+            rle_n = 0u;
+            frame_px = 0u;
+            lcd_raw_idle();
+            lcd_fill(0, 0, 160, 80, 0x0000);
+            lcd_fill(76, 36, 8, 8, 0xFFFFu);
+            for (k = 0u; k < 6u; k++)
+                iwdg_feed(), delay_ms(1);
+        }
+
         /* 待机画面：正中 8x8 方块，白/黄每秒交替一次。主机一开流就停，
          * 免得它跟画面抢窗口。
          *
@@ -325,8 +356,6 @@ int main(void)
          * “3000 次空循环约 1 ms”，一秒很稳。等待期间照样喂狗、照样收字节，
          * 一有数据立刻结束等待回去处理协议，不会漏包。 */
         if (standby_mode) {
-            static uint8_t blink_on = 1u;
-            static uint8_t blink_first = 1u;
             uint32_t i;
 
             if (blink_first) {
@@ -421,5 +450,10 @@ int main(void)
             if (++hello_tick >= 150000u)
                 hello_tick = 0u;
         }
+
+        /* 空闲时按 1 ms 一拍走，给 idle_ms 一个真实的时间基准；
+         * 有数据时保持全速，不拖慢收流。 */
+        if (rx_len == 0 && raw_left == 0u)
+            delay_ms(1);
     }
 }
