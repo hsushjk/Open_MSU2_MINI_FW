@@ -278,8 +278,12 @@ static void __attribute__((section(".ramfunc"), noinline)) ram_reset(void)
 /* 上次搬运的结果：0=成功，1=头不对，2=长度不对，3=体检失败，4=写回校验失败 */
 volatile uint8_t g_up_result __attribute__((section(".noinit")));
 
-/* v71：怀疑 BSY 位判错导致 PG 提前清掉 —— 改成“写完烧够时间再清 PG”再验一次 */
+/* v72：走 WCH 的“快速编程”通道（MODEKEYR 解模式锁 + FTPG 缓冲 + FTER 触发） */
 volatile uint8_t g_diag[10] __attribute__((section(".noinit")));
+
+#define FLASH_MODEKEYR (*(volatile uint32_t *)0x40022024u)
+#define FLASH_CTLR_FTPG (1u << 16)
+#define FLASH_CTLR_FTER (1u << 17)
 
 static void __attribute__((section(".ramfunc"), noinline)) burn(void)
 {
@@ -289,30 +293,28 @@ static void __attribute__((section(".ramfunc"), noinline)) burn(void)
         ;
 }
 
-static uint8_t __attribute__((section(".ramfunc"), noinline)) try_slow(uint32_t base)
+static void __attribute__((section(".ramfunc"), noinline)) mode_unlock(void)
+{
+    FLASH_MODEKEYR = 0x45670123u;
+    FLASH_MODEKEYR = 0xCDEF89ABu;
+}
+
+static uint8_t __attribute__((section(".ramfunc"), noinline)) try_fast(uint32_t base)
 {
     uint32_t i;
-    uint8_t buf[8];
 
-    for (i = 0; i < 8u; i++)
-        buf[i] = (uint8_t)(0xA0u + i);
     ram_unlock();
     ram_erase_page(base);
     burn();
-    ram_unlock();
-    FLASH->CTLR |= FLASH_CTLR_PG;
-    g_diag[0] = (uint8_t)(FLASH->CTLR & 0xFFu);
-    for (i = 0; i < 8u; i += 2u)
-    {
-        uint16_t h = (uint16_t)((uint16_t)buf[i] | ((uint16_t)buf[i + 1u] << 8));
-
-        *(volatile uint16_t *)(base + i) = h;
-        burn();
-    }
-    g_diag[5] = (uint8_t)(FLASH->CTLR & 0xFFu);
-    g_diag[6] = (uint8_t)((FLASH->CTLR >> 8) & 0xFFu);
+    mode_unlock();
+    g_diag[0] = (uint8_t)((FLASH->CTLR >> 16) & 0xFFu);
+    FLASH->CTLR |= FLASH_CTLR_FTPG;
+    for (i = 0; i < 8u; i += 4u)
+        *(volatile uint32_t *)(base + i) = 0xA0A1A2A3u ^ i;
+    FLASH->CTLR |= FLASH_CTLR_FTER;
     burn();
-    FLASH->CTLR &= ~FLASH_CTLR_PG;
+    burn();
+    FLASH->CTLR &= ~(FLASH_CTLR_FTPG | FLASH_CTLR_FTER);
     burn();
     return *(volatile uint8_t *)base;
 }
@@ -320,12 +322,12 @@ static uint8_t __attribute__((section(".ramfunc"), noinline)) try_slow(uint32_t 
 void __attribute__((section(".ramfunc"), noinline)) update_diag(void)
 {
     g_diag[7] = *(volatile uint8_t *)IFLASH_PROBE_ADDR;
-    g_diag[8] = *(volatile uint8_t *)0x5000u;
-    g_diag[1] = try_slow(IFLASH_PROBE_ADDR);
-    g_diag[2] = try_slow(0x5000u);
+    g_diag[1] = try_fast(IFLASH_PROBE_ADDR);
+    g_diag[2] = try_fast(0x5000u);
     g_diag[3] = (uint8_t)(FLASH->STATR & 0xFFu);
     g_diag[4] = (uint8_t)((FLASH->STATR >> 8) & 0xFFu);
-    g_diag[9] = (uint8_t)(FLASH->CTLR & 0xFFu);
+    g_diag[5] = (uint8_t)(FLASH->CTLR & 0xFFu);
+    g_diag[6] = (uint8_t)((FLASH->CTLR >> 8) & 0xFFu);
     ram_erase_page(IFLASH_PROBE_ADDR);
     ram_erase_page(0x5000u);
 }
