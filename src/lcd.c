@@ -100,11 +100,19 @@ void lcd_data16(uint16_t value)
     cs_set(1);
 }
 
+/* 1 ms 的忙等。
+ *
+ * 3000 次是早期估的数，实测偏慢约 1.7 倍（设定 4 秒实际 7 秒、设定 10 秒实际 17 秒），
+ * 于是待机闪烁、开机停留、断开回待机的计时统统被拉长。这里按实测改成 1760 次。
+ * 只影响空闲/待机里的“等一会儿”，不影响 USB 收发——那一路是中断 + 环形缓冲。
+ */
+#define DELAY_MS_LOOPS  1760u
+
 void delay_ms(uint32_t ms)
 {
     volatile uint32_t n;
     while (ms--) {
-        for (n = 0; n < 3000u; n++)  /* 实标：48 MHz 下 3000 次约 1 ms */
+        for (n = 0; n < DELAY_MS_LOOPS; n++)
             __asm__ volatile("");
     }
 }
