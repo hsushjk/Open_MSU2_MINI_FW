@@ -246,19 +246,29 @@ int asset_draw(uint8_t kind, uint8_t idx)
     if (!asset_valid(kind, idx))
         return 0;
 
-    lcd_stream_begin(0, 0, 160, 80);
+    /*
+     * 这块板子上 SPI 是屏和 flash 共用的，而且 PA6 一脚兼 flash 的 MISO 与屏的 D/C。
+     * 所以**不能**在开流（CS_LCD 低）的状态下去读 flash：读 flash 的时钟会同时打进屏里，
+     * 屏会把 0x03、地址、dummy 当成命令/数据，画面就只剩开头一小条。
+     *
+     * 正确做法：一条 2 行的带子 = 640 字节，
+     *   1) 屏 CS 高，读 flash 到 RAM；
+     *   2) 按这条带子重设窗口（顺带 CS 低、D/C=1），把 640 字节推出去；
+     *   3) 等 DMA 走完、CS 拉高，再读下一段。
+     * 窗口每条带子单独设，也就不怕 RAM 指针在 CS 翻转后失效。
+     */
     {
         uint32_t addr = asset_slot_addr(kind, idx) + HDR_SIZE;
         int y;
 
-        for (y = 0; y < 80; y += 4) {
-            flash_read(addr, row, (int)sizeof(row));
+        for (y = 0; y < 80; y += 2) {
+            flash_read(addr, row, (int)sizeof(row));      /* 此时屏未选中 */
             addr += sizeof(row);
+            lcd_stream_begin(0, y, 160, y + 2);           /* 只覆盖这 2 行 */
             lcd_raw_write(row, sizeof(row));
-            lcd_stream_wait();       /* 等这一段 DMA 走完，总线才能再去读 flash */
+            lcd_raw_idle();                               /* 等 DMA、抬 CS */
         }
     }
-    lcd_raw_idle();
     return 1;
 }
 

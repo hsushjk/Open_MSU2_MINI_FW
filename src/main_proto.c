@@ -40,6 +40,7 @@ static uint8_t    img_idx;        /* 待机轮播的当前张 */
 static uint8_t    asset_rx;       /* 1 = 正在收资产数据 */
 static uint32_t   asset_rx_left;  /* 还差多少字节 */
 static uint8_t    asset_win;       /* 1 = 分窗模式，收满一窗回一个 ack */
+static uint32_t   asset_idle;      /* 等资产数据时空转了多少圈（不用 SysTick） */
 static uint32_t   asset_last_tick; /* 上一次收到资产数据的时刻（防卡死） */
 
 static void standby_draw(void);
@@ -296,7 +297,9 @@ static void handle_frame(const uint8_t *f)
             asset_win = 0u;
             asset_last_tick = systick_now();
             r[0] = 0x0Au; r[1] = 0x01u;
-            r[2] = (uint8_t)(asset_rx ? 0x06u : 0x15u);
+            /* 注意：这里必须问 asset_writing()，不能再问 asset_rx——
+             * 分窗模式下 asset_rx 恒为 0，之前照抄它导致 begin 永远回 0x15。 */
+            r[2] = (uint8_t)(asset_writing() ? 0x06u : 0x15u);
             r[3] = 0u; r[4] = 0u; r[5] = 0u;
             usb_write(r, 6);
             return;
@@ -551,12 +554,23 @@ int main(void)
             }
         }
 
-        /* 资产写到一半没下文（主机崩了/线松了）：1 秒后作废，别把设备卡成哑巴 */
-        if (asset_rx && (uint32_t)(systick_now() - asset_last_tick) > 48000000u) {
-            asset_rx = 0u;
-            asset_rx_left = 0u;
-            asset_win = 0u;
-            asset_abort();
+        /* 资产写到一半没下文（主机崩了/线松了）：数空转圈数后作废，别把设备卡成哑巴。
+         * 这里不能用 SysTick：这颗片的 SysTick 计数方向/分频都不直观，之前用它
+         * 算时间出过“纯白方块”和“看门狗立刻触发”的巧合事故。 */
+        if (asset_rx) {
+            if (rx_len == 0) {
+                if (++asset_idle > 4000000u) {
+                    asset_rx = 0u;
+                    asset_rx_left = 0u;
+                    asset_win = 0u;
+                    asset_idle = 0u;
+                    asset_abort();
+                }
+            } else {
+                asset_idle = 0u;
+            }
+        } else {
+            asset_idle = 0u;
         }
 
         if (rx_len > 0) {
