@@ -45,7 +45,7 @@ static void up_iwdg(void)
 }
 
 /* ---- 很小的 NOR 读（复用以太先初始化好的 SPI1 与 PB7 片选） ---- */
-static void img_cs(int level)
+static void __attribute__((section(".ramfunc"), noinline)) img_cs(int level)
 {
     if (level)
         GPIOB->BSHR = 0x080u;
@@ -53,7 +53,7 @@ static void img_cs(int level)
         GPIOB->BCR = 0x080u;
 }
 
-static uint8_t img_spi(uint8_t out)
+static uint8_t __attribute__((section(".ramfunc"), noinline)) img_spi(uint8_t out)
 {
     while ((SPI1->STATR & 0x02u) == 0u)
         ;
@@ -61,6 +61,32 @@ static uint8_t img_spi(uint8_t out)
     while ((SPI1->STATR & 0x01u) == 0u)
         ;
     return (uint8_t)SPI1->DATAR;
+}
+
+/* PA6 兼 flash MISO 与屏 D/C：读 flash 前切成浮空输入，读完切回推挽输出。
+   gpio_mode() 在 flash 里，全片擦除之后不能调，所以这里直接写 CFGLR。 */
+static void __attribute__((section(".ramfunc"), noinline)) ram_dc_input(void)
+{
+    uint32_t v = GPIOA->CFGLR;
+
+    v &= ~(0xFu << 24);
+    v |= (0x4u << 24);
+    GPIOA->CFGLR = v;
+}
+
+static void __attribute__((section(".ramfunc"), noinline)) ram_dc_output(void)
+{
+    uint32_t v = GPIOA->CFGLR;
+
+    v &= ~(0xFu << 24);
+    v |= (0x2u << 24);
+    GPIOA->CFGLR = v;
+}
+
+/* up_iwdg() 在 flash 里，擦完就没得跑了，编程循环里用这个喂狗 */
+static void __attribute__((section(".ramfunc"), noinline)) ram_iwdg(void)
+{
+    *(volatile uint32_t *)0x40003000u = 0xAAAAu;
 }
 
 /* ---- NOR 写：只用于“先把镜像存进去”这一侧 ---- */
@@ -190,21 +216,20 @@ static void __attribute__((section(".ramfunc"), noinline)) ram_wait(void)
 }
 
 static int __attribute__((section(".ramfunc"), noinline)) ram_program_page(uint32_t addr,
-                                                                       const uint8_t *src)
+                                                                       const uint8_t *src,
+                                                                       uint32_t n)
 {
-    volatile uint32_t *dst = (volatile uint32_t *)addr;
-    int i;
+    uint32_t i;
 
+    /* CH32 内部 flash 只支持半字写入：写一个 16 位数、等 BSY 落下，再写下一个。
+       编程模式不需要 STRT（那是擦除用的启动位）。 */
     FLASH->CTLR |= FLASH_CTLR_PG;
-    FLASH->CTLR |= FLASH_CTLR_STRT;
-    ram_wait();
-    for (i = 0; i < 64; i++) {
-        uint32_t w = (uint32_t)src[i * 4] | ((uint32_t)src[i * 4 + 1] << 8) |
-                     ((uint32_t)src[i * 4 + 2] << 16) | ((uint32_t)src[i * 4 + 3] << 24);
+    for (i = 0; i + 1u < n; i += 2u) {
+        uint16_t h = (uint16_t)((uint16_t)src[i] | ((uint16_t)src[i + 1u] << 8));
 
-        dst[i] = w;
+        *(volatile uint16_t *)(addr + i) = h;
+        ram_wait();
     }
-    ram_wait();
     FLASH->CTLR &= ~FLASH_CTLR_PG;
     return 0;
 }
@@ -234,6 +259,9 @@ static void __attribute__((section(".ramfunc"), noinline)) ram_reset(void)
 }
 
 /* 全在 RAM 里：不调用任何 flash 里的函数（包括 spi_byte / flash_read） */
+/* 上次搬运的结果：0=成功，1=头不对，2=长度不对，3=体检失败，4=写回校验失败 */
+volatile uint8_t g_up_result __attribute__((section(".noinit")));
+
 int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
 {
     uint8_t hdr[APPIMG_HDR];
@@ -243,10 +271,9 @@ int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
     uint32_t len;
     int i;
 
-    __asm__ volatile("csrci mstatus, 8");       /* 关中断：向量表马上就要没了 */
 
     /* 1. 读镜像头（内联 SPI 读，不走 flash 里的驱动） */
-    lcd_dc_as_input();
+    ram_dc_input();
     img_cs(0);
     img_spi(0x03);
     img_spi((uint8_t)(APPIMG_ADDR >> 16));
@@ -258,35 +285,46 @@ int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
 
     if (hdr[0] != APPIMG_MAGIC0 || hdr[1] != APPIMG_MAGIC1 ||
         hdr[2] != APPIMG_MAGIC2 || hdr[3] != APPIMG_MAGIC3)
+    {
+        g_up_result = 1u;
         return 1;
+    }
     len = (uint32_t)hdr[6] | ((uint32_t)hdr[7] << 8) |
           ((uint32_t)hdr[8] << 16) | ((uint32_t)hdr[9] << 24);
     if (len == 0u || len > 48000u)
+    {
+        g_up_result = 2u;
         return 2;
+    }
 
     /* 2. 先在用不到的高段做一次“擦-写-读回”体检：
      *    页大小/编程时序只要有一处不对，这里就会失败，此时内部 flash 一点没动，
      *    设备照常用老固件跑，绝不会变砖。 */
     ram_unlock();
     ram_erase_page(IFLASH_PROBE_ADDR);
-    for (i = 0; i < 256; i++)
+    for (i = 0; i < 64; i++)
         buf[i] = (uint8_t)(i ^ 0x5Au);
-    ram_program_page(IFLASH_PROBE_ADDR, buf);
-    for (i = 0; i < 256; i++)
+    ram_program_page(IFLASH_PROBE_ADDR, buf, 64u);
+    for (i = 0; i < 64; i++)
         chk[i] = *(volatile uint8_t *)(IFLASH_PROBE_ADDR + (uint32_t)i);
-    for (i = 0; i < 256; i++)
+    for (i = 0; i < 64; i++)
         if (chk[i] != buf[i])
+        {
+            g_up_result = 3u;
             return 3;
+        }
     ram_erase_page(IFLASH_PROBE_ADDR);
 
     /* 3. 全片擦除内部 flash，再按 256 字节一页写回镜像 */
+    __asm__ volatile("csrci mstatus, 8");   /* 从这里开始向量表就要没了，关中断 */
     ram_erase_all();
+    ram_iwdg();
 
     for (off = 0u; off < len; off += 256u) {
         uint32_t n = (len - off > 256u) ? 256u : (len - off);
 
         /* 从 NOR 读一页（内联） */
-        lcd_dc_as_input();
+        ram_dc_input();
         img_cs(0);
         img_spi(0x03);
         img_spi((uint8_t)((APPIMG_ADDR + APPIMG_HDR + off) >> 16));
@@ -295,17 +333,21 @@ int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
         for (i = 0; i < (int)n; i++)
             buf[i] = img_spi(0xFF);
         img_cs(1);
-        lcd_dc_as_output();
+        ram_dc_output();
         for (i = (int)n; i < 256; i++)
             buf[i] = 0xFFu;
 
-        ram_program_page(off, buf);
+        ram_program_page(off, buf, 256u);
+        ram_iwdg();
 
         for (i = 0; i < (int)n; i++)
             chk[i] = *(volatile uint8_t *)(off + (uint32_t)i);
         for (i = 0; i < (int)n; i++)
             if (chk[i] != buf[i])
+            {
+                g_up_result = 4u;
                 return 4;
+            }
     }
 
     /* 4. 复位，让新固件跑起来 */

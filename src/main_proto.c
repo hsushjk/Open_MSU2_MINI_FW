@@ -51,6 +51,7 @@ static uint8_t  sig_pos;
 static uint8_t  sig_rx;
 static uint8_t  up_rx_on;
 static uint16_t up_rx_left;
+static uint32_t up_idle;                 /* iterations spent waiting for upload data */
 static uint32_t stream_bytes;
 
 static uint8_t standby_mode = 1u;
@@ -435,7 +436,7 @@ static void standby_tick(void)
         uint16_t col;
 
         blink_on = (uint8_t)(blink_on ^ 1u);
-        col = blink_on ? 0xFFFFu : 0xFFE0u;
+        col = blink_on ? 0xFFFFu : 0xFC80u;   /* deeper amber, easier to tell from white */
         lcd_fill(0, 0, 8, 8, col);
         lcd_fill(152, 0, 8, 8, col);
         lcd_fill(0, 72, 8, 8, col);
@@ -746,6 +747,8 @@ static void handle_frame(const uint8_t *f)
             if (f[2] == 0x01u) {
                 uint32_t len = ((uint32_t)f[4] << 8) | (uint32_t)f[5];
 
+                stream_bytes = 0u;      /* the stream budget must not cut an upload short */
+                up_idle = 0u;
                 up_rx_on = 0u;
                 ok = (uint8_t)(update_stage_begin(len) ? 0x06u : 0x15u);
                 r[0] = 0x0Au; r[1] = 0x12u; r[2] = ok;
@@ -759,12 +762,21 @@ static void handle_frame(const uint8_t *f)
                 if (wl == 0u || wl > 2048u)
                     wl = 2048u;
                 up_rx_on = 1u;
+                up_idle = 0u;
                 up_rx_left = (uint16_t)wl;
                 return;                        /* 收满回 ack */
             }
             r[0] = 0x0Au; r[1] = 0x12u; r[2] = 0x15u;
             r[3] = 0u; r[4] = 0u; r[5] = 0u;
             usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x0Fu) {                    /* 上次自更新的结果码 */
+            uint8_t rr[6];
+
+            rr[0] = 0x0Au; rr[1] = 0x0Fu; rr[2] = g_up_result;
+            rr[3] = 0u; rr[4] = 0u; rr[5] = 0u;
+            usb_write(rr, 6);
             return;
         }
         if (sub == 0x11u) {                    /* 分块签名核对：紧跟着就是 100 字节签名，收满回掩码 */
@@ -1221,6 +1233,20 @@ int main(void)
             }
         } else {
             asset_idle = 0u;
+        }
+
+        if (up_rx_on) {               /* half-open window: give up after a while */
+            if (rx_len == 0) {
+                if (++up_idle > 4000000u) {
+                    up_rx_on = 0u;
+                    up_rx_left = 0u;
+                    up_idle = 0u;
+                }
+            } else {
+                up_idle = 0u;
+            }
+        } else {
+            up_idle = 0u;
         }
 
         if (rx_len > 0) {
