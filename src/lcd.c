@@ -233,6 +233,13 @@ void lcd_raw_write(const uint8_t *p, uint32_t n)
     dma_start(p, n);       /* 这一段的传输与后续接收重叠 */
 }
 
+/* 等这一笔 DMA 传完，但保持片选低：资产（NOR 里的图）要边读边推，
+ * 总线是屏和 flash 共用的，必须一段一段来。 */
+void lcd_stream_wait(void)
+{
+    dma_finish();
+}
+
 void lcd_raw_idle(void)
 {
     dma_finish();

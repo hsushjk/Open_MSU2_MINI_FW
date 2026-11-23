@@ -64,6 +64,32 @@ void flash_read(uint32_t addr, uint8_t *dst, int n)
     lcd_dc_as_output();
 }
 
+
+/* 页编程：每页 256 字节，跨页自动切开；每页都要重新写使能。 */
+void flash_program(uint32_t addr, const uint8_t *src, int n)
+{
+    while (n > 0) {
+        int page = 256 - (int)(addr & 0xFFu);
+        int i;
+
+        if (page > n)
+            page = n;
+        flash_wren();
+        cs_flash(0);
+        spi_byte(0x02);
+        spi_byte((uint8_t)(addr >> 16));
+        spi_byte((uint8_t)(addr >> 8));
+        spi_byte((uint8_t)addr);
+        for (i = 0; i < page; i++)
+            spi_byte(src[i]);
+        cs_flash(1);
+        flash_wait_ready(200000u);
+        addr += (uint32_t)page;
+        src += page;
+        n -= page;
+    }
+}
+
 void flash_erase_4k(uint32_t addr)
 {
     flash_wren();

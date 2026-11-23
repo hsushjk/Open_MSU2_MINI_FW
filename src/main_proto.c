@@ -35,6 +35,59 @@ static uint8_t blink_on = 1u;         /* 当前方块颜色 1=白 0=黄 */
 static uint32_t idle_ms;              /* 没收到任何字节的粗略毫秒数 */
 static uint32_t win_px;   /* 当前流的窗口像素数，用于整帧角标判定 */
 
+static settings_t g_settings;     /* NOR 里的设置：开机/待机模式 */
+static uint8_t    img_idx;        /* 待机轮播的当前张 */
+static uint8_t    asset_rx;       /* 1 = 正在收资产数据 */
+static uint32_t   asset_rx_left;  /* 还差多少字节 */
+
+static void standby_draw(void);
+static void standby_tick(void);
+
+/* 画待机画面：黑屏 / 四角方块 / 图片轮播（球和呼吸灯留到下一版） */
+static void standby_draw(void)
+{
+    if (g_settings.standby_mode == 0u) {
+        lcd_fill(0, 0, 160, 80, 0x0000);
+        return;
+    }
+    if (g_settings.standby_mode == 2u) {
+        img_idx = 0u;
+        if (!asset_draw(ASSET_STANDBY, 0u))
+            lcd_fill(0, 0, 160, 80, 0x0000);
+        return;
+    }
+    lcd_fill(0, 0, 160, 80, 0x0000);
+    lcd_fill(0, 0, 8, 8, 0xFFFFu);
+    lcd_fill(152, 0, 8, 8, 0xFFFFu);
+    lcd_fill(0, 72, 8, 8, 0xFFFFu);
+    lcd_fill(152, 72, 8, 8, 0xFFFFu);
+}
+
+/* 待机画面的一次心跳：方块翻色 / 换下一张图 */
+static void standby_tick(void)
+{
+    if (g_settings.standby_mode == 2u) {
+        uint8_t n = g_settings.standby_count;
+
+        if (n == 0u || n > 8u)
+            n = 1u;
+        img_idx = (uint8_t)((img_idx + 1u) % n);
+        if (!asset_draw(ASSET_STANDBY, img_idx))
+            lcd_fill(0, 0, 160, 80, 0x0000);
+        return;
+    }
+    if (g_settings.standby_mode == 1u) {
+        uint16_t col;
+
+        blink_on = (uint8_t)(blink_on ^ 1u);
+        col = blink_on ? 0xFFFFu : 0xFFE0u;
+        lcd_fill(0, 0, 8, 8, col);
+        lcd_fill(152, 0, 8, 8, col);
+        lcd_fill(0, 72, 8, 8, col);
+        lcd_fill(152, 72, 8, 8, col);
+    }
+}
+
 static void stage_flush(void)
 {
     if (stage_len > 0u) {
@@ -206,6 +259,111 @@ static void handle_frame(const uint8_t *f)
         return;
     }
 
+    if (cls == 0x0Au) {                       /* 资产：开机/待机图 + 设置 */
+        uint8_t r[12];
+
+        if (sub == 0x00u || sub == 0x07u) {    /* 查询 */
+            r[0] = 0x0Au;
+            r[1] = sub;
+            r[2] = (uint8_t)(asset_valid(ASSET_BOOT, 0u) ? 1u : 0u);
+            r[3] = 0u;
+            {
+                uint8_t k;
+                for (k = 0u; k < 8u; k++)
+                    if (asset_valid(ASSET_STANDBY, k))
+                        r[3] = (uint8_t)(r[3] | (1u << k));
+            }
+            r[4] = g_settings.boot_mode;
+            r[5] = g_settings.standby_mode;
+            r[6] = g_settings.standby_count;
+            r[7] = (uint8_t)((g_settings.dwell >> 8) & 0xFFu);
+            r[8] = (uint8_t)(g_settings.dwell & 0xFFu);
+            r[9] = FW_VER_MAJOR;
+            r[10] = 0u;
+            r[11] = 0xAAu;
+            usb_write(r, 12);
+            return;
+        }
+        if (sub == 0x01u) {                    /* 开始写：kind idx len_hi len_lo */
+            uint32_t len = ((uint32_t)f[4] << 8) | (uint32_t)f[5];
+            lcd_raw_idle();
+            standby_mode = 0u;
+            asset_begin(f[2], f[3], len);
+            asset_rx = asset_writing();
+            asset_rx_left = len;
+            r[0] = 0x0Au; r[1] = 0x01u;
+            r[2] = (uint8_t)(asset_rx ? 0x06u : 0x15u);
+            r[3] = 0u; r[4] = 0u; r[5] = 0u;
+            usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x02u) {                    /* 放弃这次写入 */
+            asset_rx = 0u;
+            asset_rx_left = 0u;
+            r[0] = 0x0Au; r[1] = 0x02u; r[2] = 0x06u;
+            r[3] = 0u; r[4] = 0u; r[5] = 0u;
+            usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x03u) {                    /* 提交：crc32 在 b2..b5 */
+            uint32_t crc = ((uint32_t)f[2] << 24) | ((uint32_t)f[3] << 16) |
+                           ((uint32_t)f[4] << 8) | (uint32_t)f[5];
+            uint8_t ok;
+
+            asset_rx = 0u;
+            asset_rx_left = 0u;
+            ok = (uint8_t)(asset_finish(crc) ? 0x06u : 0x15u);
+            r[0] = 0x0Au; r[1] = 0x03u; r[2] = ok;
+            r[3] = 0u; r[4] = 0u; r[5] = 0u;
+            usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x04u) {                    /* 立即显示某张图（预览） */
+            uint8_t ok;
+
+            lcd_raw_idle();
+            standby_mode = 0u;
+            blink_first = 0u;
+            ok = (uint8_t)(asset_draw(f[2], f[3]) ? 0x06u : 0x15u);
+            r[0] = 0x0Au; r[1] = 0x04u; r[2] = ok;
+            r[3] = 0u; r[4] = 0u; r[5] = 0u;
+            usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x05u) {                    /* 擦掉某槽 */
+            asset_erase(f[2], f[3]);
+            r[0] = 0x0Au; r[1] = 0x05u; r[2] = 0x06u;
+            r[3] = 0u; r[4] = 0u; r[5] = 0u;
+            usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x06u) {                    /* 存设置：boot standby count dwell */
+            g_settings.boot_mode = f[2];
+            g_settings.standby_mode = f[3];
+            g_settings.standby_count = f[4];
+            g_settings.dwell = (uint16_t)f[5];
+
+            if (g_settings.boot_mode > 1u)
+                g_settings.boot_mode = 0u;
+            if (g_settings.standby_mode > 4u)
+                g_settings.standby_mode = 1u;
+            if (g_settings.standby_count == 0u || g_settings.standby_count > 8u)
+                g_settings.standby_count = 1u;
+            if (g_settings.dwell == 0u)
+                g_settings.dwell = 3u;
+            settings_save(&g_settings);
+            if (standby_mode) {
+                blink_first = 1u;
+                standby_draw();
+            }
+            r[0] = 0x0Au; r[1] = 0x06u; r[2] = 0x06u;
+            r[3] = 0u; r[4] = 0u; r[5] = 0u;
+            usb_write(r, 6);
+            return;
+        }
+        return;
+    }
+
     if (cls == 0x08u) {
         uint8_t reply[6];
         uint16_t v = adc_read(f[1]);                            /* ADC 尚未接入 */
@@ -245,10 +403,13 @@ int main(void)
     lcd_gpio_init();
     lcd_init();
     lcd_fill(0, 0, 160, 80, 0x0000);
-    lcd_fill(0, 0, 8, 8, 0xFFFF);         /* 四个角各一个方块：待机时白/黄闪 */
-    lcd_fill(152, 0, 8, 8, 0xFFFF);
-    lcd_fill(0, 72, 8, 8, 0xFFFF);
-    lcd_fill(152, 72, 8, 8, 0xFFFF);
+    settings_load(&g_settings);
+    if (g_settings.boot_mode == 1u && asset_draw(ASSET_BOOT, 0u)) {
+        standby_mode = 0u;                /* 先停在开机画面上，空闲 4 秒再进待机 */
+    } else {
+        standby_draw();
+    }
+    blink_first = 0u;
 
     adc_init();      /* 先把 ADC 弄好，免得刚枚举完就被阻住 */
     usb_init();
@@ -324,11 +485,7 @@ int main(void)
             rle_n = 0u;
             frame_px = 0u;
             lcd_raw_idle();
-            lcd_fill(0, 0, 160, 80, 0x0000);
-            lcd_fill(0, 0, 8, 8, 0xFFFFu);
-            lcd_fill(152, 0, 8, 8, 0xFFFFu);
-            lcd_fill(0, 72, 8, 8, 0xFFFFu);
-            lcd_fill(152, 72, 8, 8, 0xFFFFu);
+            standby_draw();
             for (k = 0u; k < 6u; k++)
                 iwdg_feed(), delay_ms(1);
         }
@@ -345,9 +502,14 @@ int main(void)
 
             if (blink_first) {
                 blink_first = 0u;
-                lcd_fill(76, 36, 8, 8, 0xFFFFu);
+                standby_draw();
             } else {
-                for (i = 0u; i < 600u; i++) {
+                uint32_t ticks = 600u;
+
+                /* 图片轮播按设置的“每张停留秒数”，方块轮播固定 1 秒 */
+                if (g_settings.standby_mode == 2u)
+                    ticks = (uint32_t)g_settings.dwell * 1000u;
+                for (i = 0u; i < ticks; i++) {
                     iwdg_feed();
                     n = usb_read(rx + rx_len, (int)sizeof(rx) - rx_len);
                     if (n > 0) {
@@ -363,16 +525,8 @@ int main(void)
                         usb_write(hello, 6);
                     delay_ms(1);
                 }
-                if (rx_len == 0) {
-                    uint16_t col;
-
-                    blink_on = (uint8_t)(blink_on ^ 1u);
-                    col = blink_on ? 0xFFFFu : 0xFFE0u;
-                    lcd_fill(0, 0, 8, 8, col);        /* 左上 */
-                    lcd_fill(152, 0, 8, 8, col);      /* 右上 */
-                    lcd_fill(0, 72, 8, 8, col);       /* 左下 */
-                    lcd_fill(152, 72, 8, 8, col);     /* 右下 */
-                }
+                if (rx_len == 0)
+                    standby_tick();
             }
         }
 
@@ -380,6 +534,20 @@ int main(void)
             int pos = 0;
 
             while (pos < rx_len) {
+                if (asset_rx) {
+                    uint32_t take = (uint32_t)(rx_len - pos);
+
+                    if (take > asset_rx_left)
+                        take = asset_rx_left;
+                    asset_feed(rx + pos, (int)take);
+                    pos += (int)take;
+                    asset_rx_left -= take;
+                    if (asset_rx_left == 0u)
+                        asset_rx = 0u;
+                    stall = 0u;
+                    continue;
+                }
+
                 if (raw_left > 0u) {
                     uint32_t take = (uint32_t)(rx_len - pos);
                     uint32_t i;
