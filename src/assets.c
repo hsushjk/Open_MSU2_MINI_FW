@@ -259,7 +259,7 @@ int asset_verify(uint8_t kind, uint8_t idx, uint32_t *calc)
     flash_read(addr, hdr, (int)HDR_SIZE);
     if (get32(hdr) != ASSET_MAGIC)
         return 0;
-    len = get32(hdr + 8);
+    len = get32(hdr + 10);
     if (len == 0u || len > SLOT_SIZE - HDR_SIZE)
         return 0;
     left = len;
@@ -277,7 +277,7 @@ int asset_verify(uint8_t kind, uint8_t idx, uint32_t *calc)
     crc ^= 0xFFFFFFFFu;
     if (calc)
         *calc = crc;
-    return (crc == get32(hdr + 12)) ? 1 : 0;
+    return (crc == get32(hdr + 14)) ? 1 : 0;
 }
 
 /* 图片像素数据的起始地址（跳过 20 字节槽头），淡入淡出要直接按带子读 */
