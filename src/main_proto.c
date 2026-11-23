@@ -30,6 +30,7 @@ static uint8_t rle_acc[3];
 static uint8_t rle_n;
 
 static uint32_t frame_px;
+static uint8_t standby_mode = 1u;   /* 1 = 还没收到任何画面，画待机方块 */
 static uint32_t win_px;   /* 当前流的窗口像素数，用于整帧角标判定 */
 
 static void stage_flush(void)
@@ -150,6 +151,7 @@ static void handle_frame(const uint8_t *f)
                 return;
             case 0x07:
                 t_frame_start = systick_now();
+                standby_mode = 0u;
                 win_px = (x1 > x0 && y1 > y0)
                        ? (uint32_t)(x1 - x0) * (uint32_t)(y1 - y0) : 0u;
                 lcd_stream_begin(x0, y0, x1, y1);
@@ -170,14 +172,11 @@ static void handle_frame(const uint8_t *f)
                 raw_left = (uint32_t)((f[3] << 8) | f[4]);
                 return;
             case 0x09: {
-                uint8_t st[6];
                 uint32_t frame_px_before = frame_px;
                 uint32_t win_px_before = win_px;
                 if (stage_len > 0u) { lcd_raw_write(stage[stage_idx], stage_len); stage_len = 0u; stage_idx ^= 1u; }
                 lcd_raw_idle();
-                if (win_px >= 12800u)
-                    lcd_fill(152, 72, 8, 8, (frame_px == win_px) ? 0x07E0u : 0xF800u);
-                win_px = 0u;
+                win_px = 0u;      /* 完整性色块已移除：像素对不对由裁决字节告诉上位机 */
                 frame_px = 0u;
                 frame_done++;
                 last_frame_ms = (uint16_t)((systick_now() - t_frame_start) / 48000u);
@@ -257,7 +256,6 @@ static void iwdg_feed(void)
 
 int main(void)
 {
-    uint32_t idle = 0;
     int rx_len = 0;
 
     RCC->APB2PCENR |= RCC_APB2_GPIOA | RCC_APB2_GPIOB | RCC_APB2_GPIOC | RCC_APB2_AFIO;
@@ -265,7 +263,7 @@ int main(void)
     lcd_gpio_init();
     lcd_init();
     lcd_fill(0, 0, 160, 80, 0x0000);
-    lcd_fill(0, 0, 8, 80, 0xFFFF);        /* 左白边：固件在跑 */
+    lcd_fill(76, 36, 8, 8, 0xFFFF);       /* 正中方块：固件在跑（待机时白/黄闪） */
 
     adc_init();      /* 先把 ADC 弄好，免得刚枚举完就被阻住 */
     usb_init();
@@ -316,6 +314,19 @@ int main(void)
                 rle_n = 0u;
                 lcd_raw_idle();
                 stall = 0u;
+            }
+        }
+
+        /* 待机画面：正中 8x8 方块，白/黄每秒交替一次。主机一开流就停，
+         * 免得它跟画面抢窗口。 */
+        if (standby_mode) {
+            static uint32_t blink_at;
+            static uint8_t blink_on;
+            uint32_t now = systick_now();
+            if (blink_on == 0u || (uint32_t)(now - blink_at) >= 48000000u) {
+                blink_on = (uint8_t)(blink_on ^ 1u);
+                blink_at = now;
+                lcd_fill(76, 36, 8, 8, blink_on ? 0xFFFFu : 0xFFE0u);
             }
         }
 
