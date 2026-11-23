@@ -396,6 +396,18 @@ static void handle_frame(const uint8_t *f)
             usb_write(r, 6);
             return;
         }
+        if (sub == 0x0Au) {                    /* 抹掉全部资产与设置：恢复出厂 */
+            uint8_t k;
+            asset_erase(ASSET_BOOT, 0u);
+            for (k = 0u; k < STANDBY_SLOTS; k++)
+                asset_erase(ASSET_STANDBY, k);
+            flash_erase_4k(0x0FF000u);
+            settings_default(&g_settings);
+            r[0] = 0x0Au; r[1] = 0x0Au; r[2] = 0x06u;
+            r[3] = 0u; r[4] = 0u; r[5] = 0u;
+            usb_write(r, 6);
+            return;
+        }
         if (sub == 0x06u) {                    /* 存设置：boot standby count dwell */
             g_settings.boot_mode = f[2];
             g_settings.standby_mode = f[3];
