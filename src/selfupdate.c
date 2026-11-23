@@ -262,30 +262,87 @@ static void __attribute__((section(".ramfunc"), noinline)) ram_reset(void)
 /* 上次搬运的结果：0=成功，1=头不对，2=长度不对，3=体检失败，4=写回校验失败 */
 volatile uint8_t g_up_result __attribute__((section(".noinit")));
 
-/* 内部 flash 体检诊断：每一步的寄存器状态留在 RAM，主机用 0A 20 读走。
-   g_diag: 0 CTLR 解锁前 / 1 LOCK 位 / 2 CTLR 解锁后 / 3 LOCK 位
-           4 擦除后 STATR / 5 编程后 STATR / 6 读回首字节(期望 0xA0) / 7 擦前首字节 */
-volatile uint8_t g_diag[8] __attribute__((section(".noinit")));
+/* 内部 flash 四种编程方式试一遍，看哪一种真能写进去（v67） */
+volatile uint8_t g_diag[10] __attribute__((section(".noinit")));
+
+#define FLASH_MODEKEYR (*(volatile uint32_t *)0x40022024u)
+
+static uint8_t __attribute__((section(".ramfunc"), noinline)) diag_read(uint32_t a)
+{
+    return *(volatile uint8_t *)a;
+}
 
 void __attribute__((section(".ramfunc"), noinline)) update_diag(void)
 {
-    uint8_t buf[8];
+    uint32_t base = IFLASH_PROBE_ADDR;
     uint32_t i;
+    uint8_t a;
 
-    g_diag[7] = *(volatile uint8_t *)(IFLASH_PROBE_ADDR + 1u);
-    g_diag[0] = (uint8_t)(FLASH->CTLR & 0xFFu);
-    g_diag[1] = (uint8_t)((FLASH->CTLR >> 7) & 1u);
+    /* A：半字写 */
     ram_unlock();
-    g_diag[2] = (uint8_t)(FLASH->CTLR & 0xFFu);
-    g_diag[3] = (uint8_t)((FLASH->CTLR >> 7) & 1u);
-    ram_erase_page(IFLASH_PROBE_ADDR);
-    g_diag[4] = (uint8_t)(FLASH->STATR & 0xFFu);
-    for (i = 0; i < 8u; i++)
-        buf[i] = (uint8_t)(0xA0u + i);
-    ram_program_page(IFLASH_PROBE_ADDR, buf, 8u);
+    ram_erase_page(base);
+    FLASH->CTLR |= FLASH_CTLR_PG;
+    g_diag[0] = (uint8_t)(FLASH->CTLR & 0xFFu);
+    for (i = 0; i < 8u; i += 2u)
+    {
+        uint16_t h = (uint16_t)(0xA0u + i) | (uint16_t)((0xA1u + i) << 8);
+
+        *(volatile uint16_t *)(base + i) = h;
+        ram_wait();
+    }
+    FLASH->CTLR &= ~FLASH_CTLR_PG;
+    g_diag[1] = diag_read(base);
+
+    /* B：32 位字写 */
+    ram_erase_page(base + 0x100u);
+    FLASH->CTLR |= FLASH_CTLR_PG;
+    for (i = 0; i < 8u; i += 4u)
+    {
+        uint32_t w = 0xA0A1A2A3u;
+
+        *(volatile uint32_t *)(base + 0x100u + i) = w;
+        ram_wait();
+    }
+    FLASH->CTLR &= ~FLASH_CTLR_PG;
+    g_diag[2] = diag_read(base + 0x100u);
+
+    /* C：MODEKEYR 解锁后再用 32 位字写 */
+    FLASH_MODEKEYR = 0x45670123u;
+    FLASH_MODEKEYR = 0xCDEF89ABu;
+    g_diag[6] = (uint8_t)(FLASH->CTLR & 0xFFu);
+    ram_erase_page(base + 0x200u);
+    FLASH->CTLR |= FLASH_CTLR_PG;
+    for (i = 0; i < 8u; i += 4u)
+    {
+        uint32_t w = 0xB0B1B2B3u;
+
+        *(volatile uint32_t *)(base + 0x200u + i) = w;
+        ram_wait();
+    }
+    FLASH->CTLR &= ~FLASH_CTLR_PG;
+    g_diag[3] = diag_read(base + 0x200u);
+
+    /* D：半字写 + STRT 置位（部分 WCH 批次要求） */
+    ram_erase_page(base + 0x300u);
+    FLASH->CTLR |= FLASH_CTLR_PG;
+    FLASH->CTLR |= FLASH_CTLR_STRT;
+    for (i = 0; i < 8u; i += 2u)
+        *(volatile uint16_t *)(base + 0x300u + i) = (uint16_t)(0xC0u + i);
+    ram_wait();
+    FLASH->CTLR &= ~(FLASH_CTLR_PG | FLASH_CTLR_STRT);
+    g_diag[4] = diag_read(base + 0x300u);
+
     g_diag[5] = (uint8_t)(FLASH->STATR & 0xFFu);
-    g_diag[6] = *(volatile uint8_t *)IFLASH_PROBE_ADDR;
-    ram_erase_page(IFLASH_PROBE_ADDR);
+    a = diag_read(base + 0x40u);
+    g_diag[7] = a;
+    g_diag[8] = diag_read(base + 0x400u);
+    g_diag[9] = (uint8_t)(FLASH->CTLR & 0xFFu);
+
+    /* 收尾：把试写过的页全擦回空，别留垃圾 */
+    ram_erase_page(base);
+    ram_erase_page(base + 0x100u);
+    ram_erase_page(base + 0x200u);
+    ram_erase_page(base + 0x300u);
 }
 
 int __attribute__((section(".ramfunc"), noinline)) update_apply(void)

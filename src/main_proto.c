@@ -772,21 +772,16 @@ static void handle_frame(const uint8_t *f)
             return;
         }
         if (sub == 0x20u) {
-            uint8_t rep[11];
+            uint8_t rep[12];
+            uint32_t k;
 
             update_diag();
             rep[0] = 0x0Au;
             rep[1] = 0x20u;
-            rep[2] = g_diag[0];
-            rep[3] = g_diag[1];
-            rep[4] = g_diag[2];
-            rep[5] = g_diag[3];
-            rep[6] = g_diag[4];
-            rep[7] = g_diag[5];
-            rep[8] = g_diag[6];
-            rep[9] = g_diag[7];
-            rep[10] = 0xAAu;
-            usb_write(rep, 11);
+            for (k = 0u; k < 10u; k++)
+                rep[2u + k] = g_diag[k];
+            rep[11] = 0xAAu;
+            usb_write(rep, 12);
             return;
         }
         if (sub == 0x0Fu) {                    /* 上次自更新的结果码 */
