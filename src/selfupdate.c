@@ -37,7 +37,7 @@
 #define FLASH_CTLR_STRT  (1u << 6)
 
 /* 每次启动都会跑的探测区间（内部 flash 高段，应用只有 ~15 KB 用不到这里） */
-#define IFLASH_PROBE_ADDR 0x8000u
+#define IFLASH_PROBE_ADDR 0x7000u   /* 28 KB：图只有 17 KB，若 flash 只有 32 KB 这里也在范围内 */
 
 static void up_iwdg(void)
 {
