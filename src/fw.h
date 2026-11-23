@@ -46,6 +46,15 @@ void    flash_erase_4k(uint32_t addr);
 int     flash_erase_chip_now(void);
 int     flash_is_blank(uint32_t addr, int n);
 
+/* ---- 免拆自更新（selfupdate.c） ---- */
+int  update_stage_begin(uint32_t len);
+void update_stage_feed(const uint8_t *src, int n);
+int  update_stage_commit(uint32_t crc);
+void update_set_apply_flag(void);
+void update_clear_apply_flag(void);
+int  update_pending(void);
+int  update_apply(void);
+
 /* ---- CRC32（逐位实现，不查表，省 flash） ---- */
 uint32_t asset_crc32_byte(uint32_t crc, uint8_t b);
 uint32_t asset_crc32_bytes(uint32_t crc, const uint8_t *p, int n);
@@ -120,7 +129,7 @@ extern uint16_t usb_tx_len;
 extern uint8_t  cfg_selected;
 
 #ifndef FW_VER_MAJOR
-#define FW_VER_MAJOR  59u
+#define FW_VER_MAJOR  60u
 #endif
 #ifndef FW_VER_MINOR
 #define FW_VER_MINOR  0u

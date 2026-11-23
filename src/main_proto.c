@@ -49,6 +49,8 @@ static uint8_t  sig_buf[TILE_N * 2u];
 static uint16_t sig_left;
 static uint8_t  sig_pos;
 static uint8_t  sig_rx;
+static uint8_t  up_rx_on;
+static uint16_t up_rx_left;
 static uint32_t stream_bytes;
 
 static uint8_t standby_mode = 1u;
@@ -681,6 +683,31 @@ static void handle_frame(const uint8_t *f)
         return;
     }
 
+    if (cls == 0x13u) {                       /* 自更新：提交镜像（crc32 四字节） */
+        uint8_t rr[6];
+        uint32_t crc = ((uint32_t)f[2] << 24) | ((uint32_t)f[3] << 16) |
+                       ((uint32_t)f[4] << 8) | (uint32_t)f[5];
+        uint8_t ok = (uint8_t)(update_stage_commit(crc) ? 0x06u : 0x15u);
+
+        up_rx_on = 0u;
+        rr[0] = 0x13u; rr[1] = 0x00u; rr[2] = ok;
+        rr[3] = 0u; rr[4] = 0u; rr[5] = 0u;
+        usb_write(rr, 6);
+        return;
+    }
+    if (cls == 0x14u) {                       /* 自更新：置“请更新”并立即擦写内部 flash */
+        uint8_t rr[6];
+
+        update_set_apply_flag();
+        rr[0] = 0x14u; rr[1] = 0x00u; rr[2] = 0x06u;
+        rr[3] = 0u; rr[4] = 0u; rr[5] = 0u;
+        usb_write(rr, 6);
+        delay_ms(30);
+        (void)update_apply();                 /* 体检不过会返回，继续跑老固件 */
+        update_clear_apply_flag();
+        return;
+    }
+
     if (cls == 0x0Au) {                       /* 资产：开机/待机图 + 设置 */
         uint8_t r[12];
 
@@ -709,6 +736,33 @@ static void handle_frame(const uint8_t *f)
         if (sub == 0x0Bu) {                    /* 读开机自检结果 */
             r[0] = 0x0Au; r[1] = 0x0Bu;
             r[2] = g_boot_report;
+            r[3] = 0u; r[4] = 0u; r[5] = 0u;
+            usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x12u) {                    /* 免拆自更新：begin（01）/ 一窗数据（02） */
+            uint8_t ok;
+
+            if (f[2] == 0x01u) {
+                uint32_t len = ((uint32_t)f[4] << 8) | (uint32_t)f[5];
+
+                up_rx_on = 0u;
+                ok = (uint8_t)(update_stage_begin(len) ? 0x06u : 0x15u);
+                r[0] = 0x0Au; r[1] = 0x12u; r[2] = ok;
+                r[3] = 0u; r[4] = 0u; r[5] = 0u;
+                usb_write(r, 6);
+                return;
+            }
+            if (f[2] == 0x02u) {
+                uint32_t wl = ((uint32_t)f[4] << 8) | (uint32_t)f[5];
+
+                if (wl == 0u || wl > 2048u)
+                    wl = 2048u;
+                up_rx_on = 1u;
+                up_rx_left = (uint16_t)wl;
+                return;                        /* 收满回 ack */
+            }
+            r[0] = 0x0Au; r[1] = 0x12u; r[2] = 0x15u;
             r[3] = 0u; r[4] = 0u; r[5] = 0u;
             usb_write(r, 6);
             return;
@@ -961,6 +1015,13 @@ int main(void)
     lcd_init();
     lcd_fill(0, 0, 160, 80, 0x0000);
 
+    /* 上次点过“一键刷机”：镜像已在 NOR 里，这里把它写进内部 flash 并重启。
+     * update_apply() 跑在 RAM 里；体检不过就返回，设备继续用老固件，不会变砖。 */
+    if (update_pending()) {
+        (void)update_apply();
+        update_clear_apply_flag();
+    }
+
     {
         /* 开机自检：结果既画在屏上（boot_mode==2），也存进 g_boot_report 供上位机查 */
         uint8_t rep = 0u;
@@ -1183,6 +1244,25 @@ int main(void)
                     rx_len = 0;
                     pos = 0;
                     break;
+                }
+
+                if (up_rx_on) {
+                    uint32_t take = (uint32_t)(rx_len - pos);
+                    uint8_t ack[6];
+
+                    if (take > (uint32_t)up_rx_left)
+                        take = (uint32_t)up_rx_left;
+                    update_stage_feed(rx + pos, (int)take);
+                    pos += (int)take;
+                    up_rx_left = (uint16_t)(up_rx_left - (uint16_t)take);
+                    stream_bytes += take;
+                    if (up_rx_left == 0u) {
+                        up_rx_on = 0u;
+                        ack[0] = 0x0Au; ack[1] = 0x12u; ack[2] = 0x06u;
+                        ack[3] = 0u; ack[4] = 0u; ack[5] = 0u;
+                        usb_write(ack, 6);
+                    }
+                    continue;
                 }
 
                 if (asset_rx) {

@@ -35,9 +35,12 @@ SECTIONS
         _enoinit = .;
     } > RAM
 
+    /* .ramfunc 与 .data 放在同一个输出段里：启动代码拷 .data 时
+     * 顺带把“擦写内部 flash”的那几个函数也拷进 RAM。 */
     .data : {
         _sdata = .;
         *(.data .data.*)
+        *(.ramfunc .ramfunc.*)
         *(.sdata .sdata.*)
         _edata = .;
     } > RAM AT> FLASH
