@@ -594,7 +594,7 @@ static void handle_frame(const uint8_t *f)
             g_settings.standby_count = f[4];
             g_settings.dwell = (uint16_t)f[5];
 
-            if (g_settings.boot_mode > 1u)
+            if (g_settings.boot_mode > 2u)     /* 0=不画 1=图片 2=自检 */
                 g_settings.boot_mode = 0u;
             if (g_settings.standby_mode > 4u)
                 g_settings.standby_mode = 1u;
@@ -603,7 +603,24 @@ static void handle_frame(const uint8_t *f)
             if (g_settings.dwell == 0u)
                 g_settings.dwell = 3u;
             settings_save(&g_settings);
-            if (standby_mode) {
+            if (g_settings.boot_mode == 2u) {
+                /* 选中“自检”就当场把上一次的自检结果画出来，不用拔电才看得到 */
+                uint8_t rep = g_boot_report;
+                uint8_t passed = (uint8_t)(((rep & 0x01u) ? 1 : 0) +
+                                           ((rep & 0x02u) ? 1 : 0) +
+                                           ((rep & 0x04u) ? 1 : 0) +
+                                           ((rep & 0x08u) ? 1 : 0) +
+                                           ((rep & 0x10u) ? 1 : 0));
+
+                boot_screen_begin();
+                boot_screen_row(0u, "FLASH", (uint8_t)((rep & 0x01u) ? 1u : 2u));
+                boot_screen_row(1u, "TOUCH", (uint8_t)((rep & 0x02u) ? 1u : 2u));
+                boot_screen_row(2u, "LCD",   (uint8_t)((rep & 0x04u) ? 1u : 2u));
+                boot_screen_row(3u, "USB",   (uint8_t)((rep & 0x08u) ? 1u : 2u));
+                boot_screen_row(4u, "CFG",   (uint8_t)((rep & 0x10u) ? 1u : 2u));
+                boot_screen_done(passed, 5u);
+                blink_first = 1u;
+            } else if (standby_mode) {
                 blink_first = 1u;
                 standby_draw();
             }
