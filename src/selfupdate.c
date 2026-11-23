@@ -262,6 +262,32 @@ static void __attribute__((section(".ramfunc"), noinline)) ram_reset(void)
 /* 上次搬运的结果：0=成功，1=头不对，2=长度不对，3=体检失败，4=写回校验失败 */
 volatile uint8_t g_up_result __attribute__((section(".noinit")));
 
+/* 内部 flash 体检诊断：每一步的寄存器状态留在 RAM，主机用 0A 20 读走。
+   g_diag: 0 CTLR 解锁前 / 1 LOCK 位 / 2 CTLR 解锁后 / 3 LOCK 位
+           4 擦除后 STATR / 5 编程后 STATR / 6 读回首字节(期望 0xA0) / 7 擦前首字节 */
+volatile uint8_t g_diag[8] __attribute__((section(".noinit")));
+
+void __attribute__((section(".ramfunc"), noinline)) update_diag(void)
+{
+    uint8_t buf[8];
+    uint32_t i;
+
+    g_diag[7] = *(volatile uint8_t *)(IFLASH_PROBE_ADDR + 1u);
+    g_diag[0] = (uint8_t)(FLASH->CTLR & 0xFFu);
+    g_diag[1] = (uint8_t)((FLASH->CTLR >> 7) & 1u);
+    ram_unlock();
+    g_diag[2] = (uint8_t)(FLASH->CTLR & 0xFFu);
+    g_diag[3] = (uint8_t)((FLASH->CTLR >> 7) & 1u);
+    ram_erase_page(IFLASH_PROBE_ADDR);
+    g_diag[4] = (uint8_t)(FLASH->STATR & 0xFFu);
+    for (i = 0; i < 8u; i++)
+        buf[i] = (uint8_t)(0xA0u + i);
+    ram_program_page(IFLASH_PROBE_ADDR, buf, 8u);
+    g_diag[5] = (uint8_t)(FLASH->STATR & 0xFFu);
+    g_diag[6] = *(volatile uint8_t *)IFLASH_PROBE_ADDR;
+    ram_erase_page(IFLASH_PROBE_ADDR);
+}
+
 int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
 {
     uint8_t hdr[APPIMG_HDR];
