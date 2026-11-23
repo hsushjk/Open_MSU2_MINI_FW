@@ -47,17 +47,23 @@ static uint32_t   asset_last_tick; /* 上一次收到资产数据的时刻（防
 static void standby_draw(void);
 static void standby_tick(void);
 
-/* ---------- 待机动画：3 = Ping-Pong（小球 + 同色拖尾） ---------- */
-#define BALL_CELL 10          /* 10x10 格子（原来 4x4 的 2.5 倍） */
-#define TRAIL_N   13          /* 拖尾 13 格（原来 9 的约 1.5 倍） */
+/* 待机动画里所有图形都是方形的：这颗屏分辨率低，圆画出来锯齿太明显，
+ * 用户明确要求“用同大小的正方形”。 */
+#define BALL_SZ   10          /* 正方形球：原来 4 的 2.5 倍 */
+#define DOT_SZ     6          /* 拖尾点：原来 4 的 1.5 倍 */
+#define TRAIL_N   13          /* 拖尾点数：原来 9 的约 1.5 倍 */
 #define SCR_W     160
-#define SCR_H     80
+#define SCR_H      80
+
 static int32_t ball_x5, ball_y5;      /* 位置以 1/5 像素存，速度才能是 0.6 倍 */
 static int16_t ball_dx5, ball_dy5;    /* 9/5=1.8 px/步、6/5=1.2 px/步 */
-static int16_t trail_x[TRAIL_N], trail_y[TRAIL_N];
+static int16_t trail_cx[TRAIL_N], trail_cy[TRAIL_N];
 static uint8_t trail_n;
+static uint8_t trail_skip;
 static uint16_t ball_col;
 static uint8_t ball_col_idx;
+static int16_t drawn_x, drawn_y;      /* 上一帧球的左上角 */
+static uint8_t drawn_valid;
 
 static const uint16_t BALL_COLS[6] = {
     0xFFFFu, 0xF800u, 0xFFE0u, 0x07E0u, 0x07FFu, 0xF81Fu
@@ -76,18 +82,62 @@ static uint16_t dim_color(uint16_t c, uint8_t num, uint8_t den)
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
+static int16_t ball_left(void) { return (int16_t)(ball_x5 / 5); }
+static int16_t ball_top(void)  { return (int16_t)(ball_y5 / 5); }
+static int16_t ball_cx(void)   { return (int16_t)(ball_left() + BALL_SZ / 2); }
+static int16_t ball_cy(void)   { return (int16_t)(ball_top() + BALL_SZ / 2); }
+
 static void ball_reset(void)
 {
     uint8_t k;
 
-    ball_x5 = 76 * 5; ball_y5 = 36 * 5;
+    ball_x5 = 71 * 5; ball_y5 = 31 * 5;
     ball_dx5 = 9; ball_dy5 = 6;
     ball_col_idx = 0u;
     ball_col = BALL_COLS[0];
     trail_n = 0u;
+    trail_skip = 0u;
+    drawn_valid = 0u;
     for (k = 0u; k < TRAIL_N; k++) {
-        trail_x[k] = (int16_t)(ball_x5 / 5);
-        trail_y[k] = (int16_t)(ball_y5 / 5);
+        trail_cx[k] = ball_cx();
+        trail_cy[k] = ball_cy();
+    }
+}
+
+/* 擦掉旧球身上没被新球盖住的部分。正方形做差集很简单：
+ * 上面几条、下面几条整条擦，中间重叠的行只擦左右两小条。
+ * 每步只挪 1~2 像素，所以擦掉的永远是细边，屏上不会出现“整个球突然消失”。 */
+static void erase_ball_leftover(int16_t nx, int16_t ny)
+{
+    int16_t ox0, oy0, ox1, oy1, nx0, ny0, nx1, ny1;
+    int16_t y;
+
+    if (!drawn_valid)
+        return;
+    ox0 = drawn_x; oy0 = drawn_y;
+    ox1 = (int16_t)(ox0 + BALL_SZ - 1); oy1 = (int16_t)(oy0 + BALL_SZ - 1);
+    nx0 = nx; ny0 = ny;
+    nx1 = (int16_t)(nx0 + BALL_SZ - 1); ny1 = (int16_t)(ny0 + BALL_SZ - 1);
+
+    for (y = oy0; y <= oy1; y++) {
+        if (y < 0 || y >= SCR_H)
+            continue;
+        if (y < ny0 || y > ny1) {
+            lcd_fill(ox0, y, BALL_SZ, 1, 0x0000u);
+            continue;
+        }
+        if (ox0 < nx0) {
+            int16_t w = (int16_t)((nx0 < ox1 + 1 ? nx0 : ox1 + 1) - ox0);
+
+            if (w > 0)
+                lcd_fill(ox0, y, w, 1, 0x0000u);
+        }
+        if (ox1 > nx1) {
+            int16_t x = (int16_t)((nx1 + 1 > ox0 ? nx1 + 1 : ox0));
+
+            if (x <= ox1)
+                lcd_fill(x, y, (int16_t)(ox1 - x + 1), 1, 0x0000u);
+        }
     }
 }
 
@@ -96,35 +146,33 @@ static void ball_step(void)
     uint8_t k;
     uint8_t hit = 0u;
     int32_t nx5, ny5;
-    int16_t px = (int16_t)(ball_x5 / 5);
-    int16_t py = (int16_t)(ball_y5 / 5);
+    int16_t ocx = ball_cx();
+    int16_t ocy = ball_cy();
 
-    /* 先擦旧画面：整条拖尾 + 球 */
-    for (k = 0u; k < trail_n; k++)
-        lcd_fill(trail_x[k], trail_y[k], BALL_CELL, BALL_CELL, 0x0000u);
-    lcd_fill(px, py, BALL_CELL, BALL_CELL, 0x0000u);
-
-    /* 拖尾前移，把球的旧位置插到最前 */
-    for (k = TRAIL_N - 1u; k > 0u; k--) {
-        trail_x[k] = trail_x[k - 1u];
-        trail_y[k] = trail_y[k - 1u];
+    /* 1) 每两步落一个拖尾点（1.8 px/步 → 约 3.6 px 一点） */
+    if (trail_skip == 0u) {
+        for (k = TRAIL_N - 1u; k > 0u; k--) {
+            trail_cx[k] = trail_cx[k - 1u];
+            trail_cy[k] = trail_cy[k - 1u];
+        }
+        trail_cx[0] = ocx;
+        trail_cy[0] = ocy;
+        if (trail_n < TRAIL_N)
+            trail_n++;
     }
-    trail_x[0] = px;
-    trail_y[0] = py;
-    if (trail_n < TRAIL_N)
-        trail_n++;
+    trail_skip = (uint8_t)(trail_skip ^ 1u);
 
-    /* 移动并处理反弹（1/5 像素累加，0.6 倍速是准的） */
+    /* 2) 移动并处理反弹（1/5 像素累加，0.6 倍速是准的） */
     nx5 = ball_x5 + ball_dx5;
     ny5 = ball_y5 + ball_dy5;
     if (nx5 <= 0) { nx5 = 0; ball_dx5 = (int16_t)(-ball_dx5); hit = 1u; }
-    if (nx5 >= (int32_t)(SCR_W - BALL_CELL) * 5) {
-        nx5 = (int32_t)(SCR_W - BALL_CELL) * 5;
+    if (nx5 >= (int32_t)(SCR_W - BALL_SZ) * 5) {
+        nx5 = (int32_t)(SCR_W - BALL_SZ) * 5;
         ball_dx5 = (int16_t)(-ball_dx5); hit = 1u;
     }
     if (ny5 <= 0) { ny5 = 0; ball_dy5 = (int16_t)(-ball_dy5); hit = 1u; }
-    if (ny5 >= (int32_t)(SCR_H - BALL_CELL) * 5) {
-        ny5 = (int32_t)(SCR_H - BALL_CELL) * 5;
+    if (ny5 >= (int32_t)(SCR_H - BALL_SZ) * 5) {
+        ny5 = (int32_t)(SCR_H - BALL_SZ) * 5;
         ball_dy5 = (int16_t)(-ball_dy5); hit = 1u;
     }
     ball_x5 = nx5;
@@ -136,14 +184,26 @@ static void ball_step(void)
         ball_col = BALL_COLS[ball_col_idx];
     }
 
-    lcd_fill((int16_t)(ball_x5 / 5), (int16_t)(ball_y5 / 5),
-             BALL_CELL, BALL_CELL, ball_col);
+    /* 3) 只擦细边，再画拖尾、最后画球 */
+    erase_ball_leftover(ball_left(), ball_top());
+    if (trail_n >= TRAIL_N)
+        lcd_fill((int16_t)(trail_cx[TRAIL_N - 1u] - DOT_SZ / 2),
+                 (int16_t)(trail_cy[TRAIL_N - 1u] - DOT_SZ / 2),
+                 DOT_SZ, DOT_SZ, 0x0000u);
+
     for (k = 0u; k < trail_n; k++) {
         uint8_t num = (uint8_t)(TRAIL_N - k);
 
-        lcd_fill(trail_x[k], trail_y[k], BALL_CELL, BALL_CELL,
+        lcd_fill((int16_t)(trail_cx[k] - DOT_SZ / 2),
+                 (int16_t)(trail_cy[k] - DOT_SZ / 2),
+                 DOT_SZ, DOT_SZ,
                  dim_color(ball_col, num, (uint8_t)(TRAIL_N + 1u)));
     }
+    lcd_fill(ball_left(), ball_top(), BALL_SZ, BALL_SZ, ball_col);
+
+    drawn_x = ball_left();
+    drawn_y = ball_top();
+    drawn_valid = 1u;
 }
 
 /* 画待机画面：黑屏 / 四角方块 / 图片轮播 / Ping-Pong */
@@ -178,8 +238,10 @@ static void standby_draw(void)
     if (g_settings.standby_mode == 3u) {
         lcd_fill(0, 0, 160, 80, 0x0000);
         ball_reset();
-        lcd_fill((int16_t)(ball_x5 / 5), (int16_t)(ball_y5 / 5),
-                 BALL_CELL, BALL_CELL, ball_col);
+        lcd_fill(ball_left(), ball_top(), BALL_SZ, BALL_SZ, ball_col);
+        drawn_x = ball_left();
+        drawn_y = ball_top();
+        drawn_valid = 1u;
         return;
     }
     lcd_fill(0, 0, 160, 80, 0x0000);
