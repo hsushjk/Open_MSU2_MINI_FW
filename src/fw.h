@@ -71,7 +71,7 @@ extern volatile uint8_t usb_last_b1;
 extern volatile uint32_t usb_other_count;
 
 #ifndef FW_VER_MAJOR
-#define FW_VER_MAJOR  30u
+#define FW_VER_MAJOR  31u
 #endif
 #ifndef FW_VER_MINOR
 #define FW_VER_MINOR  0u

@@ -18,7 +18,6 @@
 
 static uint8_t seg[256];
 static uint8_t rx[1024];
-static uint8_t debug_on;
 static uint8_t ver_pending;
 static uint8_t ver_val;
 static uint32_t raw_left;                 /* 还剩多少原始像素字节 */
@@ -106,13 +105,8 @@ static void handle_frame(const uint8_t *f)
     uint16_t b = (uint16_t)((f[4] << 8) | f[5]);
 
     if (cls == 0x00u) {
-        if (sub == 0x5Au) {
-            debug_on = f[2];
-            return;
-        }
         if (sub == 0x4Du) {
             connected = 1;
-            lcd_fill(152, 0, 8, 8, 0x07E0);      /* 右上绿点：已联机 */
             usb_write(f, 6);
             return;
         }
@@ -188,21 +182,6 @@ static void handle_frame(const uint8_t *f)
                 ver_val = (uint8_t)((win_px_before == 0u || frame_px_before == win_px_before)
                                     ? 0x06u : 0x15u);
                 ver_pending = 1u;
-                if (debug_on) {
-                    uint8_t dbg[11];
-                    dbg[0] = 0x55;
-                    dbg[1] = (uint8_t)(frame_done & 0xFFu);
-                    dbg[2] = (uint8_t)((frame_done >> 8) & 0xFFu);
-                    dbg[3] = (uint8_t)(usb_ep2_drop > 255u ? 255u : usb_ep2_drop);
-                    dbg[4] = (uint8_t)(frame_px_before & 0xFFu);
-                    dbg[5] = (uint8_t)((frame_px_before >> 8) & 0xFFu);
-                    dbg[6] = (uint8_t)(win_px_before & 0xFFu);
-                    dbg[7] = (uint8_t)((win_px_before >> 8) & 0xFFu);
-                    dbg[8] = (uint8_t)((last_frame_ms >> 8) & 0xFFu);
-                    dbg[9] = (uint8_t)(last_frame_ms & 0xFFu);
-                    dbg[10] = 0xAA;
-                    usb_write(dbg, 11);
-                }
                 return;
             }
             default:
@@ -266,7 +245,10 @@ int main(void)
     lcd_gpio_init();
     lcd_init();
     lcd_fill(0, 0, 160, 80, 0x0000);
-    lcd_fill(76, 36, 8, 8, 0xFFFF);       /* 正中方块：固件在跑（待机时白/黄闪） */
+    lcd_fill(0, 0, 8, 8, 0xFFFF);         /* 四个角各一个方块：待机时白/黄闪 */
+    lcd_fill(152, 0, 8, 8, 0xFFFF);
+    lcd_fill(0, 72, 8, 8, 0xFFFF);
+    lcd_fill(152, 72, 8, 8, 0xFFFF);
 
     adc_init();      /* 先把 ADC 弄好，免得刚枚举完就被阻住 */
     usb_init();
@@ -343,7 +325,10 @@ int main(void)
             frame_px = 0u;
             lcd_raw_idle();
             lcd_fill(0, 0, 160, 80, 0x0000);
-            lcd_fill(76, 36, 8, 8, 0xFFFFu);
+            lcd_fill(0, 0, 8, 8, 0xFFFFu);
+            lcd_fill(152, 0, 8, 8, 0xFFFFu);
+            lcd_fill(0, 72, 8, 8, 0xFFFFu);
+            lcd_fill(152, 72, 8, 8, 0xFFFFu);
             for (k = 0u; k < 6u; k++)
                 iwdg_feed(), delay_ms(1);
         }
@@ -362,7 +347,7 @@ int main(void)
                 blink_first = 0u;
                 lcd_fill(76, 36, 8, 8, 0xFFFFu);
             } else {
-                for (i = 0u; i < 500u; i++) {
+                for (i = 0u; i < 600u; i++) {
                     iwdg_feed();
                     n = usb_read(rx + rx_len, (int)sizeof(rx) - rx_len);
                     if (n > 0) {
@@ -379,8 +364,14 @@ int main(void)
                     delay_ms(1);
                 }
                 if (rx_len == 0) {
+                    uint16_t col;
+
                     blink_on = (uint8_t)(blink_on ^ 1u);
-                    lcd_fill(76, 36, 8, 8, blink_on ? 0xFFFFu : 0xFFE0u);
+                    col = blink_on ? 0xFFFFu : 0xFFE0u;
+                    lcd_fill(0, 0, 8, 8, col);        /* 左上 */
+                    lcd_fill(152, 0, 8, 8, col);      /* 右上 */
+                    lcd_fill(0, 72, 8, 8, col);       /* 左下 */
+                    lcd_fill(152, 72, 8, 8, col);     /* 右下 */
                 }
             }
         }
