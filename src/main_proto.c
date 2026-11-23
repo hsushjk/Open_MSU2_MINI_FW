@@ -327,14 +327,13 @@ int main(void)
         if (standby_mode) {
             static uint8_t blink_on = 1u;
             static uint8_t blink_first = 1u;
+            uint32_t i;
 
             if (blink_first) {
                 blink_first = 0u;
                 lcd_fill(76, 36, 8, 8, 0xFFFFu);
             } else {
-                uint32_t i;
-
-                for (i = 0u; i < 1000u; i++) {
+                for (i = 0u; i < 500u; i++) {
                     iwdg_feed();
                     n = usb_read(rx + rx_len, (int)sizeof(rx) - rx_len);
                     if (n > 0) {
@@ -344,6 +343,10 @@ int main(void)
                         stall = 0u;
                         break;
                     }
+                    /* 待机时主循环几乎不转，打招呼的快计数器涨不起来，
+                     * 主机就会“找不到设备”。这里每约 100 拍补一次 hello。 */
+                    if ((i % 50u) == 0u)
+                        usb_write(hello, 6);
                     delay_ms(1);
                 }
                 if (rx_len == 0) {
