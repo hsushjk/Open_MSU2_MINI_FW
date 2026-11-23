@@ -209,6 +209,19 @@ static void __attribute__((section(".ramfunc"), noinline)) ram_unlock(void)
     FLASH->KEYR = 0xCDEF89ABu;
 }
 
+/* 这颗片的 flash 控制器在每次擦/写结束后会自己把 LOCK 位重新置上，
+   所以每个操作之前都得重新解一次锁，否则后面的操作用静默忽略。 */
+static void __attribute__((section(".ramfunc"), noinline)) ram_ensure_unlock(void)
+{
+    uint32_t i;
+
+    for (i = 0; i < 3u && (FLASH->CTLR & 0x80u) != 0u; i++)
+    {
+        FLASH->KEYR = 0x45670123u;
+        FLASH->KEYR = 0xCDEF89ABu;
+    }
+}
+
 static void __attribute__((section(".ramfunc"), noinline)) ram_wait(void)
 {
     while (FLASH->STATR & 1u)
@@ -223,6 +236,7 @@ static int __attribute__((section(".ramfunc"), noinline)) ram_program_page(uint3
 
     /* CH32 内部 flash 只支持半字写入：写一个 16 位数、等 BSY 落下，再写下一个。
        编程模式不需要 STRT（那是擦除用的启动位）。 */
+    ram_ensure_unlock();
     FLASH->CTLR |= FLASH_CTLR_PG;
     for (i = 0; i + 1u < n; i += 2u) {
         uint16_t h = (uint16_t)((uint16_t)src[i] | ((uint16_t)src[i + 1u] << 8));
@@ -236,6 +250,7 @@ static int __attribute__((section(".ramfunc"), noinline)) ram_program_page(uint3
 
 static void __attribute__((section(".ramfunc"), noinline)) ram_erase_page(uint32_t addr)
 {
+    ram_ensure_unlock();
     FLASH->CTLR |= FLASH_CTLR_PER;
     FLASH->ADDR = addr;
     FLASH->CTLR |= FLASH_CTLR_STRT;
@@ -245,6 +260,7 @@ static void __attribute__((section(".ramfunc"), noinline)) ram_erase_page(uint32
 
 static void __attribute__((section(".ramfunc"), noinline)) ram_erase_all(void)
 {
+    ram_ensure_unlock();
     FLASH->CTLR |= FLASH_CTLR_MER;
     FLASH->CTLR |= FLASH_CTLR_STRT;
     ram_wait();
@@ -336,7 +352,7 @@ void __attribute__((section(".ramfunc"), noinline)) update_diag(void)
     a = diag_read(base + 0x40u);
     g_diag[7] = a;
     g_diag[8] = diag_read(base + 0x400u);
-    g_diag[9] = (uint8_t)(FLASH->CTLR & 0xFFu);
+    g_diag[9] = (uint8_t)(FLASH->CTLR & 0xFFu);   /* 收尾时看到的 CTLR（LOCK/PER 位） */
 
     /* 收尾：把试写过的页全擦回空，别留垃圾 */
     ram_erase_page(base);
