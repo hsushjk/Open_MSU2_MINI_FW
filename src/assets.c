@@ -280,6 +280,7 @@ void settings_default(settings_t *s)
     s->standby_mode = 1u;     /* 1=四角方块 */
     s->standby_count = 1u;
     s->dwell = 3u;
+    s->boot_hold = 4u;         /* 开机画面停留 4 秒 */
 }
 
 int settings_load(settings_t *s)
@@ -303,6 +304,9 @@ int settings_load(settings_t *s)
     if (s->standby_count == 0u || s->standby_count > STANDBY_SLOTS)
         s->standby_count = 1u;
     s->dwell = (uint16_t)((uint16_t)b[8] | ((uint16_t)b[9] << 8));
+    s->boot_hold = b[10];
+    if (s->boot_hold < 1u || s->boot_hold > 60u)
+        s->boot_hold = 4u;
     if (s->dwell < 1u)
         s->dwell = 3u;
     return 1;
@@ -323,6 +327,7 @@ int settings_save(const settings_t *s)
     b[7] = s->standby_count;
     b[8] = (uint8_t)(s->dwell & 0xFFu);
     b[9] = (uint8_t)((s->dwell >> 8) & 0xFFu);
+    b[10] = s->boot_hold;
     crc = asset_crc32_bytes(0xFFFFFFFFu, b, 22) ^ 0xFFFFFFFFu;
     put32(b + 28, crc);
 

@@ -30,6 +30,7 @@ static uint8_t rle_n;
 
 static uint32_t frame_px;
 static uint8_t standby_mode = 1u;
+static uint8_t boot_shown;    /* 屏幕上现在是开机画面：按 boot_hold 秒数停留 */
 static uint8_t blink_first = 1u;      /* 待机画面还没画过 */
 static uint8_t blink_on = 1u;         /* 当前方块颜色 1=白 0=黄 */
 static uint32_t idle_ms;              /* 没收到任何字节的粗略毫秒数 */
@@ -205,6 +206,7 @@ static void handle_frame(const uint8_t *f)
             case 0x07:
                 t_frame_start = systick_now();
                 standby_mode = 0u;
+                boot_shown = 0u;
                 win_px = (x1 > x0 && y1 > y0)
                        ? (uint32_t)(x1 - x0) * (uint32_t)(y1 - y0) : 0u;
                 lcd_stream_begin(x0, y0, x1, y1);
@@ -282,7 +284,7 @@ static void handle_frame(const uint8_t *f)
             r[7] = (uint8_t)((g_settings.dwell >> 8) & 0xFFu);
             r[8] = (uint8_t)(g_settings.dwell & 0xFFu);
             r[9] = FW_VER_MAJOR;
-            r[10] = 0u;
+            r[10] = g_settings.boot_hold;
             r[11] = 0xAAu;
             usb_write(r, 12);
             return;
@@ -320,6 +322,21 @@ static void handle_frame(const uint8_t *f)
             asset_win = 1u;
             asset_last_tick = systick_now();
             return;                        /* 收满了再回 ack */
+        }
+        if (sub == 0x09u) {
+            /* 开机画面停留秒数（1..60），只改设置区，不碰图片 */
+            uint8_t secs = f[2];
+
+            if (secs < 1u)
+                secs = 1u;
+            if (secs > 60u)
+                secs = 60u;
+            g_settings.boot_hold = secs;
+            (void)settings_save(&g_settings);
+            r[2] = 0x06u;
+            r[3] = secs;
+            usb_write(r, 6u);
+            return;
         }
         if (sub == 0x02u) {                    /* 放弃这次写入 */
             asset_rx = 0u;
@@ -429,7 +446,8 @@ int main(void)
     lcd_fill(0, 0, 160, 80, 0x0000);
     settings_load(&g_settings);
     if (g_settings.boot_mode == 1u && asset_draw(ASSET_BOOT, 0u)) {
-        standby_mode = 0u;                /* 先停在开机画面上，空闲 4 秒再进待机 */
+        standby_mode = 0u;                /* 先停在开机画面上，按 boot_hold 秒数再进待机 */
+    boot_shown = 1u;
     } else {
         standby_draw();
     }
@@ -492,13 +510,14 @@ int main(void)
          * 免得屏幕永远停在最后一帧上。计时用 delay_ms(1) 累加，
          * 空闲时主循环本来也没事可做，阻塞 1 ms 不影响任何东西。 */
         if (rx_len == 0 && raw_left == 0u) {
-            if (idle_ms < 6000u)
+            if (idle_ms < 61000u)
                 idle_ms++;
         } else {
             idle_ms = 0u;
         }
 
-        if (standby_mode == 0u && idle_ms >= 4000u) {
+        if (standby_mode == 0u
+            && idle_ms >= (boot_shown ? ((uint32_t)g_settings.boot_hold * 1000u) : 4000u)) {
             uint32_t k;
 
             standby_mode = 1u;

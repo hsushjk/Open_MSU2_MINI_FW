@@ -52,6 +52,7 @@ typedef struct {
     uint8_t  standby_mode;   /* 0=黑屏 1=四角方块 2=图片轮播 3=弹球 4=呼吸 */
     uint8_t  standby_count;  /* 轮播图片张数 1..8 */
     uint16_t dwell;          /* 每张停留秒数 */
+    uint8_t  boot_hold;      /* 开机画面停留秒数 1..60（0 当作 4） */
 } settings_t;
 
 #define ASSET_BOOT     0u
@@ -111,7 +112,7 @@ extern uint16_t usb_tx_len;
 extern uint8_t  cfg_selected;
 
 #ifndef FW_VER_MAJOR
-#define FW_VER_MAJOR  36u
+#define FW_VER_MAJOR  37u
 #endif
 #ifndef FW_VER_MINOR
 #define FW_VER_MINOR  0u
