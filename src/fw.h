@@ -43,7 +43,7 @@ void    flash_read(uint32_t addr, uint8_t *dst, int n);
 void    flash_wren(void);
 void    flash_program(uint32_t addr, const uint8_t *src, int n);
 void    flash_erase_4k(uint32_t addr);
-void    flash_erase_chip(void);
+int     flash_erase_chip_now(void);
 int     flash_is_blank(uint32_t addr, int n);
 
 /* ---- CRC32（逐位实现，不查表，省 flash） ---- */
@@ -73,6 +73,7 @@ uint32_t asset_left(void);
 int      asset_finish(uint32_t expect_crc);
 void     asset_erase(uint8_t kind, uint8_t idx);
 int      asset_valid(uint8_t kind, uint8_t idx);
+void    asset_invalidate(void);
 int      asset_draw(uint8_t kind, uint8_t idx);
 
 void settings_default(settings_t *s);
@@ -117,7 +118,7 @@ extern uint16_t usb_tx_len;
 extern uint8_t  cfg_selected;
 
 #ifndef FW_VER_MAJOR
-#define FW_VER_MAJOR  50u
+#define FW_VER_MAJOR  51u
 #endif
 #ifndef FW_VER_MINOR
 #define FW_VER_MINOR  0u

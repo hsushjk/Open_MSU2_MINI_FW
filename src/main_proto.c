@@ -604,13 +604,10 @@ static void handle_frame(const uint8_t *f)
             usb_write(r, 6);
             return;
         }
-        if (sub == 0x0Au) {                    /* 抹掉全部资产与设置：恢复出厂 */
-            uint8_t k;
-            asset_erase(ASSET_BOOT, 0u);
-            for (k = 0u; k < STANDBY_SLOTS; k++)
-                asset_erase(ASSET_STANDBY, k);
-            flash_erase_4k(0x0FF000u);
-            settings_default(&g_settings);
+        if (sub == 0x0Au) {                    /* 抹掉整片 1 MB NOR：恢复出厂 */
+            flash_erase_chip_now();            /* 0xC7 并等就绪，内部边等边喂狗 */
+            asset_invalidate();                /* 缓存作废，否则仍以为槽里有图 */
+            settings_default(&g_settings);     /* 只改内存；NOR 留空，下次上电自动用默认 */
             r[0] = 0x0Au; r[1] = 0x0Au; r[2] = 0x06u;
             r[3] = 0u; r[4] = 0u; r[5] = 0u;
             usb_write(r, 6);

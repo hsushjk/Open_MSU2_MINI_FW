@@ -42,9 +42,16 @@ void flash_wren(void)
 /* 等 WIP 清零；超时返回 0 */
 int flash_wait_ready(uint32_t spin)
 {
+    uint32_t feed = 0u;
+
     while (spin--) {
         if ((flash_read_status() & 0x01u) == 0)
             return 1;
+        /* 整片擦除要 1~2 秒，比 IWDG 的 1.6 秒还长：等待期间必须喂狗 */
+        if (++feed >= 4096u) {
+            feed = 0u;
+            (*(volatile uint32_t *)0x40003000u) = 0xAAAAu;
+        }
     }
     return 0;
 }
@@ -102,12 +109,15 @@ void flash_erase_4k(uint32_t addr)
     flash_wait_ready(4000000u);
 }
 
-void flash_erase_chip(void)
+/* 整片擦除：发 0xC7 后必须等到内部完成，否则紧接着的操作会被忽略。
+ * 1 MB 全片擦除典型 1~2 秒，flash_wait_ready 里边等边喂看门狗。 */
+int flash_erase_chip_now(void)
 {
     flash_wren();
     cs_flash(0);
     spi_byte(0xC7);
     cs_flash(1);
+    return flash_wait_ready(3000000u);
 }
 
 int flash_is_blank(uint32_t addr, int n)

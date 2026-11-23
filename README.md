@@ -48,6 +48,13 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -Variant proto
 - 脚本必须保持**纯 ASCII**（PowerShell 5.1 会把无 BOM 的 UTF-8 当 ANSI）。
 - `build.ps1` 时不时返回退出码 1，那是 GCC 往 stderr 打东西被 PowerShell 当成错误；**只有出现 `error:` 才是真错**。
 
+## 抹掉板载 NOR
+
+网页「开机 / 待机画面」卡片底部的**抹掉板载 NOR（全部）**按钮发的是 `0A 0A`：
+v51 起这会执行一次**整片 1 MB 擦除**（`0xC7`），把开机图、8 张待机图、设置区全部变成 `0xFF`，
+然后内存里的设置恢复出厂默认（NOR 保持空白，下次上电自动用默认值）。
+固件在等待擦除完成时会持续喂 IWDG —— 1 MB 全片擦除约 1~2 秒，不喂狗会被看门狗复位。
+
 ## 刷写
 
 USB 插上，用 WCH-LinkE / WCHISPTool 走 USB 下载，或串口 ISP。刷成砖后的救命通道是板上 `USB_D+` 与 `3.3V` 两个焊盘：**上电瞬间短接**进 ROM ISP。

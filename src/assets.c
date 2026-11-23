@@ -196,6 +196,13 @@ static int hdr_ok(uint8_t kind, uint8_t idx)
 }
 
 /* 校验 CRC（读一整帧≈25 KB，只在需要时做，结果缓存在 slot_ok 里） */
+/* 整片擦除后，之前缓存的“哪个槽有图”全部失效 */
+void asset_invalidate(void)
+{
+    slot_ok = 0u;
+    boot_ok = 0u;
+}
+
 int asset_valid(uint8_t kind, uint8_t idx)
 {
     uint8_t hdr[HDR_SIZE];
