@@ -687,7 +687,8 @@ int main(void)
                            ((rep & 0x10u) ? 1 : 0));
 
         if (g_settings.boot_mode == 2u) {
-            uint32_t ms = (uint32_t)g_settings.boot_hold * 1000u;
+            /* 自检画面固定停留 1.5 秒：太短看不清，而且这个模式不需要用户配秒数 */
+            uint32_t ms = 1500u;
 
             boot_screen_begin();
             boot_screen_row(0u, "FLASH", (uint8_t)((rep & 0x01u) ? 1u : 2u));

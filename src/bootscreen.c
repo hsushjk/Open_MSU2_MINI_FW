@@ -1,126 +1,48 @@
-/* 开机自检画面：3x5 点阵字，把每一项检查的结果直接打在屏上。
- * 之所以放固件里而不是上位机：开机画面本来就是给“不接电脑也能自检”用的。 */
+/* 开机自检画面：不用字库，纯颜色表达。
+ * 左边一列 5 个 10x10 方块对应 5 项检查（从上到下：FLASH / TOUCH / LCD / USB / CFG），
+ * 右边一个 20x20 大方块是总结果：全绿 = 全部通过，红 = 有失败。
+ * 具体哪项叫什么名字，写在 README 里，屏幕上不画字（低分辨率屏画 3x5 字太丑）。 */
 #include <stdint.h>
 #include "fw.h"
 
-#define FONT_FIRST  'A'
+#define CHK_X     56
+#define CHK_Y0    10
+#define CHK_STEP  13
+#define CHK_SIZE  10
 
-static const uint8_t FONT[39][5] = {
-    {0x02u, 0x05u, 0x07u, 0x05u, 0x05u},
-    {0x06u, 0x05u, 0x06u, 0x05u, 0x06u},
-    {0x03u, 0x04u, 0x04u, 0x04u, 0x03u},
-    {0x06u, 0x05u, 0x05u, 0x05u, 0x06u},
-    {0x07u, 0x04u, 0x06u, 0x04u, 0x07u},
-    {0x07u, 0x04u, 0x06u, 0x04u, 0x04u},
-    {0x03u, 0x04u, 0x05u, 0x05u, 0x03u},
-    {0x05u, 0x05u, 0x07u, 0x05u, 0x05u},
-    {0x07u, 0x02u, 0x02u, 0x02u, 0x07u},
-    {0x01u, 0x01u, 0x01u, 0x05u, 0x02u},
-    {0x05u, 0x05u, 0x06u, 0x05u, 0x05u},
-    {0x04u, 0x04u, 0x04u, 0x04u, 0x07u},
-    {0x05u, 0x07u, 0x05u, 0x05u, 0x05u},
-    {0x06u, 0x05u, 0x05u, 0x05u, 0x05u},
-    {0x02u, 0x05u, 0x05u, 0x05u, 0x02u},
-    {0x06u, 0x05u, 0x06u, 0x04u, 0x04u},
-    {0x02u, 0x05u, 0x05u, 0x06u, 0x03u},
-    {0x06u, 0x05u, 0x06u, 0x05u, 0x05u},
-    {0x03u, 0x04u, 0x02u, 0x01u, 0x06u},
-    {0x07u, 0x02u, 0x02u, 0x02u, 0x02u},
-    {0x05u, 0x05u, 0x05u, 0x05u, 0x03u},
-    {0x05u, 0x05u, 0x05u, 0x05u, 0x02u},
-    {0x05u, 0x05u, 0x07u, 0x07u, 0x05u},
-    {0x05u, 0x05u, 0x02u, 0x05u, 0x05u},
-    {0x05u, 0x05u, 0x02u, 0x02u, 0x02u},
-    {0x07u, 0x01u, 0x02u, 0x04u, 0x07u},
-    {0x07u, 0x05u, 0x05u, 0x05u, 0x07u},
-    {0x02u, 0x06u, 0x02u, 0x02u, 0x07u},
-    {0x07u, 0x01u, 0x07u, 0x04u, 0x07u},
-    {0x07u, 0x01u, 0x03u, 0x01u, 0x07u},
-    {0x05u, 0x05u, 0x07u, 0x01u, 0x01u},
-    {0x07u, 0x04u, 0x07u, 0x01u, 0x07u},
-    {0x07u, 0x04u, 0x07u, 0x05u, 0x07u},
-    {0x07u, 0x01u, 0x02u, 0x02u, 0x02u},
-    {0x07u, 0x05u, 0x07u, 0x05u, 0x07u},
-    {0x07u, 0x05u, 0x07u, 0x01u, 0x07u},
-    {0x00u, 0x00u, 0x00u, 0x00u, 0x00u},
-    {0x00u, 0x00u, 0x07u, 0x00u, 0x00u},
-    {0x00u, 0x02u, 0x00u, 0x02u, 0x00u},
-};
+#define SUM_X    104
+#define SUM_Y     30
+#define SUM_SIZE  20
 
-/* 字符 -> 字体表下标 */
-static int font_index(char c)
-{
-    if (c >= 'a' && c <= 'z')
-        c = (char)(c - 'a' + 'A');
-    if (c >= 'A' && c <= 'Z')
-        return (int)(c - 'A');
-    if (c >= '0' && c <= '9')
-        return 26 + (int)(c - '0');
-    if (c == ' ')
-        return 36;
-    if (c == '-')
-        return 37;
-    if (c == ':')
-        return 38;
-    return 36;
-}
+#define COL_OK    0x07E0u    /* 绿：通过 */
+#define COL_BAD   0xF800u    /* 红：失败 */
+#define COL_WAIT  0x7BEFu    /* 灰：还没测 */
+#define COL_BG    0x0000u
 
-static void draw_char(int x, int y, char ch, int scale, uint16_t col)
-{
-    int i = font_index(ch);
-    int r, c;
-
-    for (r = 0; r < 5; r++) {
-        uint8_t bits = FONT[i][r];
-
-        for (c = 0; c < 3; c++) {
-            if (bits & (uint8_t)(4u >> c))
-                lcd_fill(x + c * scale, y + r * scale, scale, scale, col);
-        }
-    }
-}
-
-static void draw_str(int x, int y, const char *s, int scale, uint16_t col)
-{
-    while (*s) {
-        draw_char(x, y, *s, scale, col);
-        x += 4 * scale;
-        s++;
-    }
-}
-
-/* 画自检标题与背景 */
 void boot_screen_begin(void)
 {
-    lcd_fill(0, 0, 160, 80, 0x0000);
-    draw_str(6, 3, "SELF TEST", 2, 0xCE79);
-    lcd_fill(6, 15, 148, 1, 0x528A);
+    lcd_fill(0, 0, 160, 80, COL_BG);
 }
 
-/* 画一行检查结果：state 0=进行中(灰) 1=通过(绿) 2=失败(红) */
+/* state：0=进行中(灰) 1=通过(绿) 2=失败(红) */
 void boot_screen_row(uint8_t row, const char *label, uint8_t state)
 {
-    int y = 18 + (int)row * 12;
-    uint16_t col = (state == 1u) ? 0x07E0u : (state == 2u) ? 0xF800u : 0x7BEFu;
+    int y = CHK_Y0 + (int)row * CHK_STEP;
+    uint16_t col = (state == 1u) ? COL_OK : (state == 2u) ? COL_BAD : COL_WAIT;
 
-    draw_str(8, y, label, 2, 0xCE79);
-    lcd_fill(144, y, 8, 8, col);
+    (void)label;             /* 不用文字，参数保留是为了接口稳定 */
+    lcd_fill(CHK_X, y, CHK_SIZE, CHK_SIZE, col);
 }
 
-/* 全部做完：把总数与通过数打在底部 */
+/* 总结果：全绿 / 红。passed/total 只用来判断是否全过 */
 void boot_screen_done(uint8_t passed, uint8_t total)
 {
-    char buf[16];
-    int n = 0;
+    uint16_t col = (passed >= total) ? COL_OK : COL_BAD;
 
-    buf[n++] = (char)('0' + (passed / 10));
-    buf[n++] = (char)('0' + (passed % 10));
-    buf[n++] = '/';
-    buf[n++] = (char)('0' + (total / 10));
-    buf[n++] = (char)('0' + (total % 10));
-    buf[n++] = ' ';
-    buf[n++] = 'O';
-    buf[n++] = 'K';
-    buf[n] = 0;
-    draw_str(8, 66, buf, 2, (passed == total) ? 0x07E0u : 0xF800u);
+    lcd_fill(SUM_X, SUM_Y, SUM_SIZE, SUM_SIZE, col);
+    /* 外框用同色加一圈，远看更像“对/错”的指示灯 */
+    lcd_fill(SUM_X - 2, SUM_Y - 2, SUM_SIZE + 4, 2, col);
+    lcd_fill(SUM_X - 2, SUM_Y + SUM_SIZE, SUM_SIZE + 4, 2, col);
+    lcd_fill(SUM_X - 2, SUM_Y, 2, SUM_SIZE, col);
+    lcd_fill(SUM_X + SUM_SIZE, SUM_Y, 2, SUM_SIZE, col);
 }
