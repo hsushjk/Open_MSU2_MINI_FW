@@ -49,6 +49,8 @@ static uint8_t  sig_buf[TILE_N * 2u];
 static uint16_t sig_left;
 static uint8_t  sig_pos;
 static uint8_t  sig_rx;
+static uint32_t stream_bytes;
+
 static uint8_t standby_mode = 1u;
 static uint8_t boot_shown;    /* 屏幕上现在是开机画面：按 boot_hold 秒数停留 */
 static uint8_t blink_first = 1u;      /* 待机画面还没画过 */
@@ -609,6 +611,7 @@ static void handle_frame(const uint8_t *f)
                 lcd_fill(x0, y0, x1 - x0, y1 - y0, (uint16_t)((f[3] << 8) | f[4]));
                 return;
             case 0x07:
+                stream_bytes = 0u;
                 t_frame_start = systick_now();
                 standby_mode = 0u;
                 boot_shown = 0u;
@@ -631,12 +634,14 @@ static void handle_frame(const uint8_t *f)
                 rle_mode = f[5];
                 rle_n = 0u;
                 raw_left = (uint32_t)((f[3] << 8) | f[4]);
+                if (raw_left > 8192u) raw_left = 8192u;
                 return;
             case 0x0Cu:
                 if (stage_len > 0u) { stream_write(stage[stage_idx], stage_len); stage_len = 0u; stage_idx ^= 1u; }
                 rle_mode = 0u;               /* 原样段：必须关掉上一段的行程解码 */
                 rle_n = 0u;
                 raw_left = (uint32_t)((f[3] << 8) | f[4]);
+                if (raw_left > 8192u) raw_left = 8192u;
                 return;
             case 0x09: {
                 uint32_t frame_px_before = frame_px;
@@ -708,14 +713,10 @@ static void handle_frame(const uint8_t *f)
             usb_write(r, 6);
             return;
         }
-        if (sub == 0x11u) {                    /* 分块签名核对：先回“开始收”，再收 100 字节 */
+        if (sub == 0x11u) {                    /* 分块签名核对：紧跟着就是 100 字节签名，收满回掩码 */
             sig_rx = 1u;
             sig_left = (uint16_t)(TILE_N * 2u);
             sig_pos = 0u;
-            r[0] = 0x0Au; r[1] = 0x11u; r[2] = 0x06u;
-            r[3] = 0u; r[4] = 0u; r[5] = 0u;
-            hb_hold = 400u;
-            usb_write(r, 6);
             return;
         }
         if (sub == 0x01u) {                    /* 开始写：kind idx len_hi len_lo */
@@ -946,6 +947,7 @@ static void iwdg_feed(void)
     *(volatile uint32_t *)0x40003000u = 0xAAAAu;
 }
 
+
 int main(void)
 {
     int rx_len = 0;
@@ -1164,6 +1166,25 @@ int main(void)
             int pos = 0;
 
             while (pos < rx_len) {
+                if (stream_bytes > 40000u) {
+                    /* 声明长度和实际字节数已经对不上：作废这一段，并丢掉本批剩余字节，
+                     * 免得把后面的字节当像素或当命令误读。下一轮从干净状态重来。 */
+                    raw_left = 0u;
+                    stage_len = 0u;
+                    rle_n = 0u;
+                    sig_rx = 0u;
+                    sig_left = 0u;
+                    sig_pos = 0u;
+                    asset_rx = 0u;
+                    asset_rx_left = 0u;
+                    asset_win = 0u;
+                    stream_bytes = 0u;
+                    lcd_raw_idle();
+                    rx_len = 0;
+                    pos = 0;
+                    break;
+                }
+
                 if (asset_rx) {
                     uint32_t take = (uint32_t)(rx_len - pos);
 
@@ -1172,6 +1193,7 @@ int main(void)
                     asset_feed(rx + pos, (int)take);
                     pos += (int)take;
                     asset_rx_left -= take;
+                    stream_bytes += take;
                     asset_last_tick = systick_now();
                     if (asset_rx_left == 0u) {
                         asset_rx = 0u;
@@ -1195,6 +1217,7 @@ int main(void)
                         sig_buf[sig_pos + (uint8_t)i] = rx[pos + (int)i];
                     sig_pos = (uint8_t)(sig_pos + (uint8_t)take);
                     sig_left = (uint16_t)(sig_left - (uint16_t)take);
+                    stream_bytes += take;
                     pos += (int)take;
                     stall = 0u;
                     if (sig_left == 0u) {
@@ -1241,6 +1264,7 @@ int main(void)
                             rle_feed((uint8_t)rx[pos + (int)i]);
                         pos += (int)take;
                         raw_left -= take;
+                        stream_bytes += take;
                         if (raw_left == 0u)
                             stage_flush();
                     } else {
@@ -1254,6 +1278,7 @@ int main(void)
                         stage_len += take;
                         pos += (int)take;
                         raw_left -= take;
+                        stream_bytes += take;
 
                         if (stage_len == sizeof(stage[0]) || (raw_left == 0u && stage_len > 0u))
                             stage_flush();
@@ -1286,10 +1311,10 @@ int main(void)
 
         if (hb_hold > 0u) {
             hb_hold--;
-        } else if (++quiet >= 30000u) {
+        } else if (++quiet >= 120000u) {
             if (hello_tick == 0u)
                 usb_write(hello, 6);
-            if (++hello_tick >= 150000u)
+            if (++hello_tick >= 15000u)
                 hello_tick = 0u;
         }
 
