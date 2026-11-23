@@ -546,6 +546,7 @@ static int connected;
 static uint8_t page_no;
 
 static const uint8_t hello[6] = { 0x00, 0x4D, 0x53, 0x4E, 0x30, 0x32 };
+static uint32_t hb_hold;		/* >0：暂缓心跳，给应答包让路 */
 
 static void seg_fill4(const uint8_t *p)
 {
@@ -713,6 +714,7 @@ static void handle_frame(const uint8_t *f)
             sig_pos = 0u;
             r[0] = 0x0Au; r[1] = 0x11u; r[2] = 0x06u;
             r[3] = 0u; r[4] = 0u; r[5] = 0u;
+            hb_hold = 400u;
             usb_write(r, 6);
             return;
         }
@@ -1196,10 +1198,11 @@ int main(void)
                     pos += (int)take;
                     stall = 0u;
                     if (sig_left == 0u) {
-                        uint8_t rep[9];
+                        uint8_t rep[10];
                         uint8_t bit;
 
                         sig_rx = 0u;
+                        hb_hold = 400u;      /* 回包期间先别发心跳，EP3 只有一笔在途缓冲 */
                         rep[0] = 0x0Au;
                         rep[1] = 0x11u;
                         rep[2] = 0u;
@@ -1208,7 +1211,8 @@ int main(void)
                         rep[5] = 0u;
                         rep[6] = 0u;
                         rep[7] = 0u;
-                        rep[8] = 0xAAu;
+                        rep[8] = 0u;
+                        rep[9] = 0xAAu;
                         for (bit = 0u; bit < (uint8_t)TILE_N; bit++) {
                             uint16_t want = (uint16_t)(sig_buf[bit * 2u] |
                                                        ((uint16_t)sig_buf[bit * 2u + 1u] << 8));
@@ -1220,7 +1224,7 @@ int main(void)
                                     rep[2u + idx] = (uint8_t)(rep[2u + idx] | (1u << (bit % 8u)));
                             }
                         }
-                        usb_write(rep, 9);
+                        usb_write(rep, 10);
                     }
                     continue;
                 }
@@ -1280,7 +1284,9 @@ int main(void)
         if (ver_pending && usb_write(&ver_val, 1u))
             ver_pending = 0u;
 
-        if (++quiet >= 30000u) {
+        if (hb_hold > 0u) {
+            hb_hold--;
+        } else if (++quiet >= 30000u) {
             if (hello_tick == 0u)
                 usb_write(hello, 6);
             if (++hello_tick >= 150000u)
