@@ -245,6 +245,41 @@ int asset_valid(uint8_t kind, uint8_t idx)
 }
 
 /* 把槽里的图画到屏上（左上角对齐，160x80 正好整屏） */
+/* 回读校验：把槽里的像素重新读一遍算 CRC32，跟头部记的比。
+ * 返回 1 = 一致（calc 给算出来的值），0 = 不一致或没有图。 */
+int asset_verify(uint8_t kind, uint8_t idx, uint32_t *calc)
+{
+    uint8_t hdr[HDR_SIZE];
+    uint32_t addr = asset_slot_addr(kind, idx);
+    uint32_t len;
+    uint32_t crc = 0xFFFFFFFFu;
+    uint32_t left;
+    uint8_t  buf[64];
+
+    flash_read(addr, hdr, (int)HDR_SIZE);
+    if (get32(hdr) != ASSET_MAGIC)
+        return 0;
+    len = get32(hdr + 8);
+    if (len == 0u || len > SLOT_SIZE - HDR_SIZE)
+        return 0;
+    left = len;
+    addr += HDR_SIZE;
+    while (left > 0u) {
+        int n = (left > sizeof(buf)) ? (int)sizeof(buf) : (int)left;
+        int i;
+
+        flash_read(addr, buf, n);
+        for (i = 0; i < n; i++)
+            crc = asset_crc32_byte(crc, buf[i]);
+        addr += (uint32_t)n;
+        left -= (uint32_t)n;
+    }
+    crc ^= 0xFFFFFFFFu;
+    if (calc)
+        *calc = crc;
+    return (crc == get32(hdr + 12)) ? 1 : 0;
+}
+
 /* 图片像素数据的起始地址（跳过 20 字节槽头），淡入淡出要直接按带子读 */
 uint32_t asset_data_addr(uint8_t kind, uint8_t idx)
 {

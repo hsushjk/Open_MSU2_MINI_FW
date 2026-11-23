@@ -49,6 +49,36 @@ static void standby_draw(void);
 static void standby_tick(void);
 static void iwdg_feed(void);
 
+/* ---------- 复位原因面包屑 ----------
+ * 0x20004F00 是 RAM 顶部（.bss 之外、栈底之下）的 16 字节，不复位电源就跨复位保留。
+ * 每次走到关键阶段就记一个码；异常复位（看门狗/硬件错）后这个码还留着，
+ * 上位机一问就知道"上次是死在哪一步"。
+ *   1=main 开始  2=usb_init 完成  3=开机画面  4=主循环  5=收像素
+ *   6=写资产    7=淡入淡出      8=整片擦除  9=待机动画 */
+#define TRACE_MAGIC 0x4D534252u
+
+typedef struct {
+    uint32_t magic;
+    uint32_t stage;
+    uint32_t boots;
+    uint32_t aux;
+} trace_t;
+
+#define TRACE ((volatile trace_t *)0x20004F00u)
+#define TRACE_STAGE(s) (TRACE->stage = (uint32_t)(s))
+
+static void trace_boot(void)
+{
+    if (TRACE->magic != TRACE_MAGIC) {
+        TRACE->magic = TRACE_MAGIC;
+        TRACE->stage = 0u;
+        TRACE->boots = 0u;
+        TRACE->aux = 0u;
+    }
+    TRACE->boots = TRACE->boots + 1u;
+}
+
+
 /* 待机动画里所有图形都是方形的：这颗屏分辨率低，圆画出来锯齿太明显，
  * 用户明确要求“用同大小的正方形”。 */
 #define BALL_SZ   10          /* 正方形球：原来 4 的 2.5 倍 */
@@ -292,6 +322,7 @@ static void standby_fade(uint8_t from, uint8_t to)
     a_base = (from == 0xFFu) ? 0u : asset_data_addr(ASSET_STANDBY, from);
     b_base = asset_data_addr(ASSET_STANDBY, to);
 
+    TRACE_STAGE(7u);
     for (step = 1u; step <= FADE_STEPS; step++) {
         uint32_t wa = (uint32_t)(FADE_STEPS - step);
         uint32_t wb = (uint32_t)step;
@@ -354,6 +385,7 @@ static void standby_draw(void)
 /* 待机画面的一次心跳：方块翻色 / 换下一张图 */
 static void standby_tick(void)
 {
+    TRACE_STAGE(9u);
     if (g_settings.standby_mode == 2u) {
         uint8_t nx = next_valid_slot(img_idx);
 
@@ -387,6 +419,7 @@ static void standby_tick(void)
 
 static void stage_flush(void)
 {
+    TRACE_STAGE(5u);
     if (stage_len > 0u) {
         frame_px += (uint32_t)(stage_len >> 1);
         lcd_raw_write(stage[stage_idx], stage_len);
@@ -678,6 +711,46 @@ static void handle_frame(const uint8_t *f)
             usb_write(r, 6);
             return;
         }
+        if (sub == 0x0Du) {                    /* 复位面包屑：上次停在哪一步 */
+            uint32_t boots = TRACE->boots;
+
+            r[0] = 0x0Au; r[1] = 0x0Du;
+            r[2] = (uint8_t)(TRACE->stage & 0xFu);
+            r[3] = (uint8_t)(boots & 0xFFu);
+            r[4] = (uint8_t)((boots >> 8) & 0xFFu);
+            r[5] = 0xAAu;
+            usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x0Eu) {                    /* 资产回读校验：kind idx */
+            uint32_t calc = 0u;
+            uint8_t ok = (uint8_t)asset_verify(f[2], f[3], &calc);
+
+            r[0] = 0x0Au; r[1] = 0x0Eu;
+            r[2] = (uint8_t)(ok ? 0x06u : 0x15u);
+            r[3] = (uint8_t)(calc & 0xFFu);
+            r[4] = (uint8_t)((calc >> 8) & 0xFFu);
+            r[5] = 0xAAu;
+            usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x10u) {                    /* 动画步进探针：跑 n 次待机心跳，用来验证不会卡死 */
+            uint8_t n = f[2];
+            uint8_t i;
+
+            if (n == 0u)
+                n = 1u;
+            if (n > 40u)
+                n = 40u;
+            for (i = 0u; i < n; i++) {
+                standby_tick();
+                iwdg_feed();
+            }
+            r[0] = 0x0Au; r[1] = 0x10u; r[2] = 0x06u;
+            r[3] = n; r[4] = 0u; r[5] = 0xAAu;
+            usb_write(r, 6);
+            return;
+        }
         if (sub == 0x0Cu) {                    /* 读 NOR：addr(3) + len(1)，最多 48 字节 */
             uint32_t addr = ((uint32_t)f[2] << 16) | ((uint32_t)f[3] << 8) | (uint32_t)f[4];
             uint8_t n = f[5];
@@ -694,6 +767,7 @@ static void handle_frame(const uint8_t *f)
             return;
         }
         if (sub == 0x0Au) {                    /* 抹掉整片 1 MB NOR：恢复出厂 */
+            TRACE_STAGE(8u);
             flash_erase_chip_now();            /* 0xC7 并等就绪，内部边等边喂狗 */
             asset_invalidate();                /* 缓存作废，否则仍以为槽里有图 */
             settings_default(&g_settings);     /* 只改内存；NOR 留空，下次上电自动用默认 */
@@ -780,6 +854,9 @@ int main(void)
 {
     int rx_len = 0;
 
+    trace_boot();
+    TRACE_STAGE(1u);
+
     RCC->APB2PCENR |= RCC_APB2_GPIOA | RCC_APB2_GPIOB | RCC_APB2_GPIOC | RCC_APB2_AFIO;
     board_clock_init();
     lcd_gpio_init();
@@ -798,6 +875,7 @@ int main(void)
 
         adc_init();      /* 先把 ADC 弄好，免得刚枚举完就被阻住 */
         usb_init();
+        TRACE_STAGE(2u);
 
         flash_read_id(id);
         if (id[0] == 0x85u && id[1] == 0x60u && id[2] == 0x14u)
@@ -842,6 +920,7 @@ int main(void)
             standby_draw();
         }
         blink_first = 0u;
+        TRACE_STAGE(3u);
     }
 
     /* SysTick 自检：10 ms 应当约 480 000 个计数 */
@@ -866,6 +945,7 @@ int main(void)
 
     for (;;) {
         iwdg_feed();
+        TRACE_STAGE(4u);
         int n;
         static uint32_t quiet;
         static uint32_t hello_tick;
@@ -968,6 +1048,7 @@ int main(void)
          * 这里不能用 SysTick：这颗片的 SysTick 计数方向/分频都不直观，之前用它
          * 算时间出过“纯白方块”和“看门狗立刻触发”的巧合事故。 */
         if (asset_rx) {
+            TRACE_STAGE(6u);
             if (rx_len == 0) {
                 if (++asset_idle > 4000000u) {
                     asset_rx = 0u;
