@@ -110,14 +110,24 @@ void flash_erase_4k(uint32_t addr)
 }
 
 /* 整片擦除：发 0xC7 后必须等到内部完成，否则紧接着的操作会被忽略。
- * 1 MB 全片擦除典型 1~2 秒，flash_wait_ready 里边等边喂看门狗。 */
-int flash_erase_chip_now(void)
+ * 1 MB 全片擦除典型 1~2 秒，flash_wait_ready 里边等边喂看门狗。
+ * 有些批次的片子只认 0x60，抽查中段不干净就再补一次。 */
+static int flash_chip_erase_once(uint8_t cmd)
 {
     flash_wren();
     cs_flash(0);
-    spi_byte(0xC7);
+    spi_byte(cmd);
     cs_flash(1);
     return flash_wait_ready(3000000u);
+}
+
+int flash_erase_chip_now(void)
+{
+    flash_chip_erase_once(0xC7u);
+    if (flash_is_blank(0x080000u, 16) && flash_is_blank(0x0C0000u, 16))
+        return 1;
+    flash_chip_erase_once(0x60u);
+    return flash_is_blank(0x080000u, 16) && flash_is_blank(0x0C0000u, 16);
 }
 
 int flash_is_blank(uint32_t addr, int n)

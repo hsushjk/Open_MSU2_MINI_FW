@@ -65,6 +65,7 @@ typedef struct {
 
 uint32_t asset_slot_addr(uint8_t kind, uint8_t idx);
 uint32_t asset_max_len(void);
+uint32_t asset_data_addr(uint8_t kind, uint8_t idx);
 void     asset_begin(uint8_t kind, uint8_t idx, uint32_t len);
 void     asset_feed(const uint8_t *src, int n);
 int      asset_writing(void);
@@ -118,7 +119,7 @@ extern uint16_t usb_tx_len;
 extern uint8_t  cfg_selected;
 
 #ifndef FW_VER_MAJOR
-#define FW_VER_MAJOR  51u
+#define FW_VER_MAJOR  52u
 #endif
 #ifndef FW_VER_MINOR
 #define FW_VER_MINOR  0u

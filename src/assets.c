@@ -245,6 +245,12 @@ int asset_valid(uint8_t kind, uint8_t idx)
 }
 
 /* 把槽里的图画到屏上（左上角对齐，160x80 正好整屏） */
+/* 图片像素数据的起始地址（跳过 20 字节槽头），淡入淡出要直接按带子读 */
+uint32_t asset_data_addr(uint8_t kind, uint8_t idx)
+{
+    return asset_slot_addr(kind, idx) + HDR_SIZE;
+}
+
 int asset_draw(uint8_t kind, uint8_t idx)
 {
     static uint8_t row[640];         /* 4 行像素 */

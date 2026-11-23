@@ -157,3 +157,4 @@ src/
 build.ps1        构建脚本（-Variant proto 等）
 link.ld          62K flash / 20K RAM
 ```
+| v52 | 待机图片切换加 8 步交叉淡入淡出（NOR 无帧缓存，边读边混边推）；新增 `0A 0C` 读 NOR（自检抽查用）；整片擦除加 `0x60` 兜底 |

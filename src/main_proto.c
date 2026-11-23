@@ -47,6 +47,7 @@ static uint32_t   asset_last_tick; /* 上一次收到资产数据的时刻（防
 
 static void standby_draw(void);
 static void standby_tick(void);
+static void iwdg_feed(void);
 
 /* 待机动画里所有图形都是方形的：这颗屏分辨率低，圆画出来锯齿太明显，
  * 用户明确要求“用同大小的正方形”。 */
@@ -250,6 +251,74 @@ static uint8_t next_valid_slot(uint8_t from)
     return 0xFFu;
 }
 
+/* ---------- 待机图片交叉淡入淡出 ----------
+ * 这块板上没有帧缓存，所以是"边读边混边推"：一条 2 行带子（640 字节）
+ * 从 NOR 各读一份，按权重混合后整条推给屏。8 级权重用 >>3 完成，
+ * SPI 24 MHz 下整屏一次过渡约 170 ms（8 步）。
+ * 注意：读 flash 时必须让屏 CS 保持高（PA6 一脚两用），所以每条带子
+ * 都是"先读、再开窗、再推、再抬 CS"，跟 asset_draw 一样。 */
+#define FADE_STEPS 8u
+
+static uint8_t fade_a[640];
+static uint8_t fade_b[640];
+
+static void fade_rows(const uint8_t *a, const uint8_t *b, uint32_t wa, uint32_t wb)
+{
+    int i;
+
+    for (i = 0; i < 640; i += 2) {
+        uint16_t pa = (uint16_t)(((uint16_t)a[i] << 8) | a[i + 1]);
+        uint16_t pb = (uint16_t)(((uint16_t)b[i] << 8) | b[i + 1]);
+        uint16_t r = (uint16_t)(((((pa >> 11) & 0x1Fu) * wa) + (((pb >> 11) & 0x1Fu) * wb)) >> 3);
+        uint16_t g = (uint16_t)(((((pa >> 5) & 0x3Fu) * wa) + (((pb >> 5) & 0x3Fu) * wb)) >> 3);
+        uint16_t bl = (uint16_t)((((pa & 0x1Fu) * wa) + ((pb & 0x1Fu) * wb)) >> 3);
+        uint16_t o = (uint16_t)((r << 11) | (g << 5) | bl);
+
+        fade_a[i] = (uint8_t)(o >> 8);
+        fade_a[i + 1] = (uint8_t)(o & 0xFFu);
+    }
+}
+
+/* from = 0xFF 表示从黑场淡入 */
+static void standby_fade(uint8_t from, uint8_t to)
+{
+    uint8_t step;
+    int y;
+    uint32_t a_base;
+    uint32_t b_base;
+
+    if (!asset_valid(ASSET_STANDBY, to))
+        return;
+    a_base = (from == 0xFFu) ? 0u : asset_data_addr(ASSET_STANDBY, from);
+    b_base = asset_data_addr(ASSET_STANDBY, to);
+
+    for (step = 1u; step <= FADE_STEPS; step++) {
+        uint32_t wa = (uint32_t)(FADE_STEPS - step);
+        uint32_t wb = (uint32_t)step;
+        uint32_t ao = a_base;
+        uint32_t bo = b_base;
+
+        for (y = 0; y < 80; y += 2) {
+            int i;
+
+            if (from == 0xFFu) {
+                for (i = 0; i < 640; i++)
+                    fade_a[i] = 0u;                 /* 黑场 */
+            } else {
+                flash_read(ao, fade_a, 640);
+                ao += 640u;
+            }
+            flash_read(bo, fade_b, 640);
+            bo += 640u;
+            fade_rows(fade_a, fade_b, wa, wb);
+            lcd_stream_begin(0, y, 160, y + 2);
+            lcd_raw_write(fade_a, 640);
+            lcd_raw_idle();
+        }
+        iwdg_feed();
+    }
+}
+
 static void standby_draw(void)
 {
     if (g_settings.standby_mode == 0u) {
@@ -260,8 +329,10 @@ static void standby_draw(void)
         uint8_t first = next_valid_slot(0xFFu);    /* 0xFF 当作“从头找” */
 
         img_idx = (first == 0xFFu) ? 0u : first;
-        if (first == 0xFFu || !asset_draw(ASSET_STANDBY, img_idx))
+        if (first == 0xFFu || !asset_valid(ASSET_STANDBY, img_idx))
             lcd_fill(0, 0, 160, 80, 0x0000);
+        else
+            standby_fade(0xFFu, img_idx);          /* 从黑场淡入 */
         return;
     }
     if (g_settings.standby_mode == 3u) {
@@ -290,9 +361,12 @@ static void standby_tick(void)
             lcd_fill(0, 0, 160, 80, 0x0000);
             return;
         }
-        img_idx = nx;
-        if (!asset_draw(ASSET_STANDBY, img_idx))
-            lcd_fill(0, 0, 160, 80, 0x0000);
+        {
+            uint8_t prev = asset_valid(ASSET_STANDBY, img_idx) ? img_idx : 0xFFu;
+
+            img_idx = nx;
+            standby_fade(prev, img_idx);           /* 上一张 → 这张，跨 8 步过渡 */
+        }
         return;
     }
     if (g_settings.standby_mode == 3u) {
@@ -602,6 +676,21 @@ static void handle_frame(const uint8_t *f)
             r[0] = 0x0Au; r[1] = 0x05u; r[2] = 0x06u;
             r[3] = 0u; r[4] = 0u; r[5] = 0u;
             usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x0Cu) {                    /* 读 NOR：addr(3) + len(1)，最多 48 字节 */
+            uint32_t addr = ((uint32_t)f[2] << 16) | ((uint32_t)f[3] << 8) | (uint32_t)f[4];
+            uint8_t n = f[5];
+            uint8_t buf[52];
+
+            if (n == 0u)
+                n = 1u;
+            if (n > 48u)
+                n = 48u;
+            flash_read(addr, &buf[3], (int)n);
+            buf[0] = 0x0Au; buf[1] = 0x0Cu; buf[2] = n;
+            buf[3u + n] = 0xAAu;
+            usb_write(buf, (int)n + 4);
             return;
         }
         if (sub == 0x0Au) {                    /* 抹掉整片 1 MB NOR：恢复出厂 */
