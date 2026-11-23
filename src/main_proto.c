@@ -30,7 +30,8 @@ static uint8_t rle_acc[3];
 static uint8_t rle_n;
 
 static uint32_t frame_px;
-static uint8_t standby_mode = 1u;   /* 1 = 还没收到任何画面，画待机方块 */
+static uint8_t standby_mode = 1u;
+static uint8_t blink_once;   /* 1 = 还没收到任何画面，画待机方块 */
 static uint32_t win_px;   /* 当前流的窗口像素数，用于整帧角标判定 */
 
 static void stage_flush(void)
@@ -69,6 +70,30 @@ static volatile uint16_t last_frame_ms;
 static uint32_t systick_now(void)
 {
     return *(volatile uint32_t *)0xE000F008u;
+}
+
+/* SysTick 的 CNT 向下计数，且每 0xFFFFFF 次回卷；直接相减得不到“经过的毫秒”。
+ * 这里在主循环里按差值累加，换算出一个单调递增的毫秒数，供待机闪烁之类使用。 */
+static uint32_t ms_ticks;
+static uint32_t ms_frac;
+static uint32_t ms_last_cnt;
+
+static void ms_tick_poll(void)
+{
+    uint32_t c = systick_now();
+    uint32_t d;
+
+    if (c > ms_last_cnt)
+        d = ms_last_cnt + (0x01000000u - c);   /* CNT 回卷：补上整圈 */
+    else
+        d = ms_last_cnt - c;                   /* 向下计数，差值就是经过的计数 */
+    ms_last_cnt = c;
+    ms_frac += d;
+    if (ms_frac >= 48000u) {
+        uint32_t ms = ms_frac / 48000u;
+        ms_frac -= ms * 48000u;
+        ms_ticks += ms;
+    }
 }
 
 static void systick_init(void)
@@ -288,8 +313,10 @@ int main(void)
 
     iwdg_start();
 
+    ms_last_cnt = systick_now();
     for (;;) {
         iwdg_feed();
+        ms_tick_poll();
         int n;
         static uint32_t quiet;
         static uint32_t hello_tick;
@@ -322,10 +349,14 @@ int main(void)
         if (standby_mode) {
             static uint32_t blink_at;
             static uint8_t blink_on;
-            uint32_t now = systick_now();
-            if (blink_on == 0u || (uint32_t)(now - blink_at) >= 48000000u) {
+            if (blink_once == 0u) {
+                blink_once = 1u;
+                blink_on = 1u;
+                blink_at = ms_ticks;
+                lcd_fill(76, 36, 8, 8, 0xFFFFu);
+            } else if ((uint32_t)(ms_ticks - blink_at) >= 1000u) {
                 blink_on = (uint8_t)(blink_on ^ 1u);
-                blink_at = now;
+                blink_at = ms_ticks;
                 lcd_fill(76, 36, 8, 8, blink_on ? 0xFFFFu : 0xFFE0u);
             }
         }
