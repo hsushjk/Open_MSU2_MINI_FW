@@ -47,6 +47,97 @@ static uint32_t   asset_last_tick; /* 上一次收到资产数据的时刻（防
 static void standby_draw(void);
 static void standby_tick(void);
 
+/* ---------- 待机动画：3 = 弹球 + 拖尾，4 = 呼吸灯 ---------- */
+#define BALL_CELL 4
+#define TRAIL_N   9
+#define SCR_W     160
+#define SCR_H     80
+static int16_t ball_x, ball_y, ball_dx, ball_dy;
+static int16_t trail_x[TRAIL_N], trail_y[TRAIL_N];
+static uint8_t trail_n;
+static uint8_t breathe_lvl;
+static uint8_t breathe_dir;
+
+static uint16_t grey(uint8_t lvl)          /* lvl 0..31 -> RGB565 灰度 */
+{
+    uint16_t v = (uint16_t)(lvl & 0x1Fu);
+    return (uint16_t)((v << 11) | ((uint16_t)((v & 0x1Eu) << 6)) |
+                      (uint16_t)(v >> 1));
+}
+
+static void circle_fill(int cx, int cy, int r, uint16_t col)
+{
+    int dy;
+    for (dy = -r; dy <= r; dy++) {
+        int rr = r * r - dy * dy;
+        int x = 0;
+        while ((x + 1) * (x + 1) <= rr)
+            x++;
+        if (x > 0)
+            lcd_fill(cx - x, cy + dy, x * 2, 1, col);
+    }
+}
+
+static void ball_reset(void)
+{
+    uint8_t k;
+    ball_x = 76; ball_y = 36; ball_dx = 3; ball_dy = 2;
+    trail_n = 0u;
+    for (k = 0u; k < TRAIL_N; k++) {
+        trail_x[k] = ball_x;
+        trail_y[k] = ball_y;
+    }
+}
+
+static void ball_step(void)
+{
+    uint8_t k;
+
+    /* 先擦掉旧的拖尾与球，再整体重画（格子小，几笔就完，不会闪） */
+    for (k = 0u; k < trail_n; k++)
+        lcd_fill(trail_x[k], trail_y[k], BALL_CELL, BALL_CELL, 0x0000u);
+    lcd_fill(ball_x, ball_y, BALL_CELL, BALL_CELL, 0x0000u);
+
+    for (k = TRAIL_N - 1u; k > 0u; k--) {
+        trail_x[k] = trail_x[k - 1u];
+        trail_y[k] = trail_y[k - 1u];
+    }
+    trail_x[0] = ball_x;
+    trail_y[0] = ball_y;
+    if (trail_n < TRAIL_N)
+        trail_n++;
+
+    ball_x = (int16_t)(ball_x + ball_dx);
+    ball_y = (int16_t)(ball_y + ball_dy);
+    if (ball_x <= 0) { ball_x = 0; ball_dx = (int16_t)(-ball_dx); }
+    if (ball_x >= SCR_W - BALL_CELL) { ball_x = SCR_W - BALL_CELL; ball_dx = (int16_t)(-ball_dx); }
+    if (ball_y <= 0) { ball_y = 0; ball_dy = (int16_t)(-ball_dy); }
+    if (ball_y >= SCR_H - BALL_CELL) { ball_y = SCR_H - BALL_CELL; ball_dy = (int16_t)(-ball_dy); }
+
+    lcd_fill(ball_x, ball_y, BALL_CELL, BALL_CELL, 0xFFFFu);
+    for (k = 0u; k < trail_n; k++) {
+        uint8_t lvl = (uint8_t)(31u * (uint8_t)(TRAIL_N - k) / (TRAIL_N + 1u));
+        lcd_fill(trail_x[k], trail_y[k], BALL_CELL, BALL_CELL, grey(lvl));
+    }
+}
+
+static void breathe_step(void)
+{
+    uint16_t col;
+
+    /* 亮度 0 -> 31 -> 0 来回走 */
+    if (breathe_dir) {
+        if (breathe_lvl >= 31u) { breathe_dir = 0u; }
+        else breathe_lvl++;
+    } else {
+        if (breathe_lvl == 0u) { breathe_dir = 1u; }
+        else breathe_lvl--;
+    }
+    lcd_fill(52, 12, 56, 56, 0x0000u);      /* 清掉上一帧的圆 */
+    col = grey(breathe_lvl);
+    circle_fill(80, 40, 26, col);
+}
+
 /* 画待机画面：黑屏 / 四角方块 / 图片轮播（球和呼吸灯留到下一版） */
 /* 从 from 的下一个开始，找一个有图的槽；都没有返回 0xFF */
 static uint8_t next_valid_slot(uint8_t from)
@@ -76,6 +167,18 @@ static void standby_draw(void)
             lcd_fill(0, 0, 160, 80, 0x0000);
         return;
     }
+    if (g_settings.standby_mode == 3u) {
+        lcd_fill(0, 0, 160, 80, 0x0000);
+        ball_reset();
+        lcd_fill(ball_x, ball_y, BALL_CELL, BALL_CELL, 0xFFFFu);
+        return;
+    }
+    if (g_settings.standby_mode == 4u) {
+        lcd_fill(0, 0, 160, 80, 0x0000);
+        breathe_lvl = 0u;
+        breathe_dir = 1u;
+        return;
+    }
     lcd_fill(0, 0, 160, 80, 0x0000);
     lcd_fill(0, 0, 8, 8, 0xFFFFu);
     lcd_fill(152, 0, 8, 8, 0xFFFFu);
@@ -96,6 +199,14 @@ static void standby_tick(void)
         img_idx = nx;
         if (!asset_draw(ASSET_STANDBY, img_idx))
             lcd_fill(0, 0, 160, 80, 0x0000);
+        return;
+    }
+    if (g_settings.standby_mode == 3u) {
+        ball_step();
+        return;
+    }
+    if (g_settings.standby_mode == 4u) {
+        breathe_step();
         return;
     }
     if (g_settings.standby_mode == 1u) {
@@ -582,6 +693,10 @@ int main(void)
                 /* 图片轮播按设置的“每张停留秒数”，方块轮播固定 1 秒 */
                 if (g_settings.standby_mode == 2u)
                     ticks = (uint32_t)g_settings.dwell * 1000u;
+                else if (g_settings.standby_mode == 3u)
+                    ticks = 20u;        /* 弹球：约 20 ms 一步，50 步/秒 */
+                else if (g_settings.standby_mode == 4u)
+                    ticks = 25u;        /* 呼吸灯：约 25 ms 一步，一呼一吸约 1.6 s */
                 for (i = 0u; i < ticks; i++) {
                     iwdg_feed();
                     n = usb_read(rx + rx_len, (int)sizeof(rx) - rx_len);
