@@ -784,6 +784,19 @@ static void handle_frame(const uint8_t *f)
             usb_write(rep, 12);
             return;
         }
+        if (sub == 0x21u || sub == 0x22u) {
+            uint8_t rep[35];
+            uint32_t k;
+
+            update_dump(sub == 0x22u ? 1 : 0);
+            rep[0] = 0x0Au;
+            rep[1] = (uint8_t)sub;
+            for (k = 0u; k < 32u; k++)
+                rep[2u + k] = g_regs[k];
+            rep[34] = 0xAAu;
+            usb_write(rep, 35);
+            return;
+        }
         if (sub == 0x0Fu) {                    /* 上次自更新的结果码 */
             uint8_t rr[6];
 

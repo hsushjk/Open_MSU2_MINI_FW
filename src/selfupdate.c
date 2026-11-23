@@ -361,6 +361,37 @@ void __attribute__((section(".ramfunc"), noinline)) update_diag(void)
     ram_erase_page(base + 0x300u);
 }
 
+/* v70：把 FLASH 寄存器块的 8 个字原样吐出来，用来确认这颗片的布局 */
+volatile uint8_t g_regs[32] __attribute__((section(".noinit")));
+
+void __attribute__((section(".ramfunc"), noinline)) update_dump(int after)
+{
+    volatile uint32_t *f = (volatile uint32_t *)0x40022000u;
+    uint32_t i;
+
+    if (after)
+    {
+        ram_unlock();
+        ram_erase_page(IFLASH_PROBE_ADDR);
+        {
+            uint8_t buf[8];
+
+            for (i = 0; i < 8u; i++)
+                buf[i] = (uint8_t)(0xA0u + i);
+            ram_program_page(IFLASH_PROBE_ADDR, buf, 8u);
+        }
+    }
+    for (i = 0; i < 8u; i++)
+    {
+        uint32_t v = f[i];
+
+        g_regs[i * 4u + 0u] = (uint8_t)v;
+        g_regs[i * 4u + 1u] = (uint8_t)(v >> 8);
+        g_regs[i * 4u + 2u] = (uint8_t)(v >> 16);
+        g_regs[i * 4u + 3u] = (uint8_t)(v >> 24);
+    }
+}
+
 int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
 {
     uint8_t hdr[APPIMG_HDR];
