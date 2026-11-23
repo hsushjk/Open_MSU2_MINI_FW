@@ -21,7 +21,6 @@
 #define BOOT_ADDR     0x000000u
 #define STANDBY_BASE  0x010000u
 #define SLOT_SIZE     0x00008000u
-#define STANDBY_SLOTS 8
 #define HDR_SIZE      20u
 #define PAGE_SIZE     256u
 
@@ -276,11 +275,11 @@ int asset_draw(uint8_t kind, uint8_t idx)
 
 void settings_default(settings_t *s)
 {
-    s->boot_mode = 0u;        /* 0=不画开机画面 */
-    s->standby_mode = 1u;     /* 1=四角方块 */
-    s->standby_count = 1u;
+    s->boot_mode = 0u;        /* 默认不画开机画面 */
+    s->standby_mode = 1u;     /* 默认四角方块 */
+    s->standby_count = STANDBY_SLOTS;   /* 轮播时遍历全部槽位，空槽自动跳过 */
     s->dwell = 3u;
-    s->boot_hold = 4u;         /* 开机画面停留 4 秒 */
+    s->boot_hold = 3u;        /* 开机画面停留 3 秒 */
 }
 
 int settings_load(settings_t *s)

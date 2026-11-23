@@ -57,6 +57,7 @@ typedef struct {
 
 #define ASSET_BOOT     0u
 #define ASSET_STANDBY  1u
+#define STANDBY_SLOTS  8u     /* 待机图片槽数（NOR 里 0x010000 起每槽 32 KB） */
 
 uint32_t asset_slot_addr(uint8_t kind, uint8_t idx);
 uint32_t asset_max_len(void);
@@ -112,7 +113,7 @@ extern uint16_t usb_tx_len;
 extern uint8_t  cfg_selected;
 
 #ifndef FW_VER_MAJOR
-#define FW_VER_MAJOR  38u
+#define FW_VER_MAJOR  39u
 #endif
 #ifndef FW_VER_MINOR
 #define FW_VER_MINOR  0u

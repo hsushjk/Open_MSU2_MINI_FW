@@ -48,6 +48,20 @@ static void standby_draw(void);
 static void standby_tick(void);
 
 /* 画待机画面：黑屏 / 四角方块 / 图片轮播（球和呼吸灯留到下一版） */
+/* 从 from 的下一个开始，找一个有图的槽；都没有返回 0xFF */
+static uint8_t next_valid_slot(uint8_t from)
+{
+    uint8_t k;
+
+    for (k = 1u; k <= STANDBY_SLOTS; k++) {
+        uint8_t idx = (uint8_t)((from + k) % STANDBY_SLOTS);
+
+        if (asset_valid(ASSET_STANDBY, idx))
+            return idx;
+    }
+    return 0xFFu;
+}
+
 static void standby_draw(void)
 {
     if (g_settings.standby_mode == 0u) {
@@ -55,8 +69,10 @@ static void standby_draw(void)
         return;
     }
     if (g_settings.standby_mode == 2u) {
-        img_idx = 0u;
-        if (!asset_draw(ASSET_STANDBY, 0u))
+        uint8_t first = next_valid_slot(0xFFu);    /* 0xFF 当作“从头找” */
+
+        img_idx = (first == 0xFFu) ? 0u : first;
+        if (first == 0xFFu || !asset_draw(ASSET_STANDBY, img_idx))
             lcd_fill(0, 0, 160, 80, 0x0000);
         return;
     }
@@ -71,11 +87,13 @@ static void standby_draw(void)
 static void standby_tick(void)
 {
     if (g_settings.standby_mode == 2u) {
-        uint8_t n = g_settings.standby_count;
+        uint8_t nx = next_valid_slot(img_idx);
 
-        if (n == 0u || n > 8u)
-            n = 1u;
-        img_idx = (uint8_t)((img_idx + 1u) % n);
+        if (nx == 0xFFu) {
+            lcd_fill(0, 0, 160, 80, 0x0000);
+            return;
+        }
+        img_idx = nx;
         if (!asset_draw(ASSET_STANDBY, img_idx))
             lcd_fill(0, 0, 160, 80, 0x0000);
         return;
