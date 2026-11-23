@@ -1,0 +1,20 @@
+/* 板级初始化：时钟与 flash 等待周期
+ *
+ * 照原厂 SystemInit（@0x3B32）逐条搬：
+ *   1. 打开内部高速振荡器
+ *   2. flash 取指等待周期设为 2
+ *   3. CFGR0 清掉 PLL 相关位，系统时钟留在 HSI
+ *
+ * 第 2 条尤其重要：48 MHz 下如果 flash 等待周期是 0，取指会不稳定，
+ * 表现为偶发的花屏、错字或跑飞。我们的第一版固件漏了这一步。
+ */
+#include "regs.h"
+
+#define FLASH_ACTLR (*(volatile uint32_t *)0x40022000u)
+
+void board_clock_init(void)
+{
+    RCC->CTLR |= 1u;                                  /* HSION */
+    FLASH_ACTLR = (FLASH_ACTLR & ~3u) | 2u;           /* 2 wait states */
+    RCC->CFGR0 &= 0xF8FFFF0Fu;                        /* PLL 关闭，SW 保持 HSI */
+}
