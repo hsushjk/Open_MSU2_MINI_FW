@@ -37,6 +37,7 @@ static uint32_t idle_ms;              /* 没收到任何字节的粗略毫秒数
 static uint32_t win_px;   /* 当前流的窗口像素数，用于整帧角标判定 */
 
 static settings_t g_settings;     /* NOR 里的设置：开机/待机模式 */
+uint8_t g_boot_report;            /* 开机自检结果位图：bit0 FLASH / bit1 TOUCH / bit2 LCD / bit3 USB / bit4 SETTINGS */
 static uint8_t    img_idx;        /* 待机轮播的当前张 */
 static uint8_t    asset_rx;       /* 1 = 正在收资产数据 */
 static uint32_t   asset_rx_left;  /* 还差多少字节 */
@@ -479,6 +480,13 @@ static void handle_frame(const uint8_t *f)
             usb_write(r, 12);
             return;
         }
+        if (sub == 0x0Bu) {                    /* 读开机自检结果 */
+            r[0] = 0x0Au; r[1] = 0x0Bu;
+            r[2] = g_boot_report;
+            r[3] = 0u; r[4] = 0u; r[5] = 0u;
+            usb_write(r, 6);
+            return;
+        }
         if (sub == 0x01u) {                    /* 开始写：kind idx len_hi len_lo */
             uint32_t len = ((uint32_t)f[4] << 8) | (uint32_t)f[5];
             lcd_raw_idle();
@@ -646,17 +654,63 @@ int main(void)
     lcd_gpio_init();
     lcd_init();
     lcd_fill(0, 0, 160, 80, 0x0000);
-    settings_load(&g_settings);
-    if (g_settings.boot_mode == 1u && asset_draw(ASSET_BOOT, 0u)) {
-        standby_mode = 0u;                /* 先停在开机画面上，按 boot_hold 秒数再进待机 */
-    boot_shown = 1u;
-    } else {
-        standby_draw();
-    }
-    blink_first = 0u;
 
-    adc_init();      /* 先把 ADC 弄好，免得刚枚举完就被阻住 */
-    usb_init();
+    {
+        /* 开机自检：结果既画在屏上（boot_mode==2），也存进 g_boot_report 供上位机查 */
+        uint8_t rep = 0u;
+        uint8_t id[3];
+        uint16_t touch;
+        int cfg_ok;
+        uint8_t passed;
+
+        cfg_ok = settings_load(&g_settings);
+
+        adc_init();      /* 先把 ADC 弄好，免得刚枚举完就被阻住 */
+        usb_init();
+
+        flash_read_id(id);
+        if (id[0] == 0x85u && id[1] == 0x60u && id[2] == 0x14u)
+            rep |= 0x01u;
+        (void)adc_read(9u);                  /* 第一拍只是启动转换 */
+        delay_ms(2);
+        touch = adc_read(9u);
+        if (touch > 100u && touch < 4200u)
+            rep |= 0x02u;
+        rep |= 0x04u;                        /* LCD：能走到这里说明初始化没卡住 */
+        rep |= 0x08u;                        /* USB：端点已配好，没有卡死 */
+        if (cfg_ok)
+            rep |= 0x10u;
+        g_boot_report = rep;
+
+        passed = (uint8_t)(((rep & 0x01u) ? 1 : 0) + ((rep & 0x02u) ? 1 : 0) +
+                           ((rep & 0x04u) ? 1 : 0) + ((rep & 0x08u) ? 1 : 0) +
+                           ((rep & 0x10u) ? 1 : 0));
+
+        if (g_settings.boot_mode == 2u) {
+            uint32_t ms = (uint32_t)g_settings.boot_hold * 1000u;
+
+            boot_screen_begin();
+            boot_screen_row(0u, "FLASH", (uint8_t)((rep & 0x01u) ? 1u : 2u));
+            boot_screen_row(1u, "TOUCH", (uint8_t)((rep & 0x02u) ? 1u : 2u));
+            boot_screen_row(2u, "LCD",   (uint8_t)((rep & 0x04u) ? 1u : 2u));
+            boot_screen_row(3u, "USB",   (uint8_t)((rep & 0x08u) ? 1u : 2u));
+            boot_screen_row(4u, "CFG",   (uint8_t)((rep & 0x10u) ? 1u : 2u));
+            boot_screen_done(passed, 5u);
+            while (ms > 0u) {
+                iwdg_feed();
+                delay_ms(1);
+                ms--;
+            }
+            boot_shown = 0u;
+            standby_draw();
+        } else if (g_settings.boot_mode == 1u && asset_draw(ASSET_BOOT, 0u)) {
+            standby_mode = 0u;            /* 先停在开机画面上，按 boot_hold 秒数再进待机 */
+            boot_shown = 1u;
+        } else {
+            standby_draw();
+        }
+        blink_first = 0u;
+    }
 
     /* SysTick 自检：10 ms 应当约 480 000 个计数 */
     {

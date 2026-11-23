@@ -18,6 +18,10 @@ void lcd_init(void);
 void lcd_command(uint8_t cmd);
 void lcd_data8(uint8_t value);
 void lcd_fill(int x, int y, int w, int h, uint16_t colour);
+/* 开机自检画面（bootscreen.c） */
+void boot_screen_begin(void);
+void boot_screen_row(uint8_t row, const char *label, uint8_t state);
+void boot_screen_done(uint8_t passed, uint8_t total);
 void lcd_blit(int x, int y, int w, int h, const uint8_t *bytes_pixels);
 void lcd_set_window(int x0, int y0, int x1, int y1);
 void lcd_stream_begin(int x, int y, int x2, int y2);
@@ -113,7 +117,7 @@ extern uint16_t usb_tx_len;
 extern uint8_t  cfg_selected;
 
 #ifndef FW_VER_MAJOR
-#define FW_VER_MAJOR  46u
+#define FW_VER_MAJOR  47u
 #endif
 #ifndef FW_VER_MINOR
 #define FW_VER_MINOR  0u
