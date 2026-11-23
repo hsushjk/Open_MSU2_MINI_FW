@@ -771,60 +771,6 @@ static void handle_frame(const uint8_t *f)
             usb_write(r, 6);
             return;
         }
-        if (sub == 0x20u) {
-            uint8_t rep[12];
-            uint32_t k;
-
-            update_diag();
-            rep[0] = 0x0Au;
-            rep[1] = 0x20u;
-            for (k = 0u; k < 10u; k++)
-                rep[2u + k] = g_diag[k];
-            rep[11] = 0xAAu;
-            usb_write(rep, 12);
-            return;
-        }
-        if (sub == 0x23u) {
-            uint8_t rep[6];
-            uint32_t k;
-
-            update_write_probe();
-            rep[0] = 0x0Au;
-            rep[1] = 0x23u;
-            rep[2] = 0x06u;
-            for (k = 3u; k < 6u; k++)
-                rep[k] = 0u;
-            usb_write(rep, 6);
-            return;
-        }
-        if (sub == 0x24u) {
-            uint8_t rep[11];
-            uint8_t b[8];
-            uint32_t k;
-
-            update_read_probe(b);
-            rep[0] = 0x0Au;
-            rep[1] = 0x24u;
-            for (k = 0u; k < 8u; k++)
-                rep[2u + k] = b[k];
-            rep[10] = 0xAAu;
-            usb_write(rep, 11);
-            return;
-        }
-        if (sub == 0x25u) {
-            uint8_t rep[6];
-            uint32_t k;
-
-            rep[0] = 0x0Au;
-            rep[1] = 0x25u;
-            rep[2] = 0x06u;
-            for (k = 3u; k < 6u; k++)
-                rep[k] = 0u;
-            usb_write(rep, 6);
-            delay_ms(20);
-            update_reset();
-            return;
-        }
         if (sub == 0x0Fu) {                    /* 上次自更新的结果码 */
             uint8_t rr[6];
 
