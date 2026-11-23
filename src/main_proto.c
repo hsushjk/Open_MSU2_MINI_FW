@@ -29,6 +29,26 @@ static uint8_t rle_acc[3];
 static uint8_t rle_n;
 
 static uint32_t frame_px;
+
+/* 16x16 分块签名：记录每一块“设备实际画上去的像素”，主机发帧后核对，
+ * 只补发没画对的块。签名 = 加和 ^ 异或（每块 32 位，折成 16 位比对）。 */
+#define TILE_COLS 10u
+#define TILE_ROWS 5u
+#define TILE_N    (TILE_COLS * TILE_ROWS)
+static uint32_t tile_sum[TILE_N];
+static uint32_t tile_xor[TILE_N];
+static uint8_t  tile_written[TILE_N];
+static int      tile_x;
+static int      tile_y;
+static int      tile_x0;
+static int      tile_y0;
+static int      tile_w;
+static uint8_t  tile_hi;
+static uint8_t  tile_half;
+static uint8_t  sig_buf[TILE_N * 2u];
+static uint16_t sig_left;
+static uint8_t  sig_pos;
+static uint8_t  sig_rx;
 static uint8_t standby_mode = 1u;
 static uint8_t boot_shown;    /* 屏幕上现在是开机画面：按 boot_hold 秒数停留 */
 static uint8_t blink_first = 1u;      /* 待机画面还没画过 */
@@ -419,12 +439,68 @@ static void standby_tick(void)
     }
 }
 
+static void tile_reset_region(int rx0, int ry0, int rx1, int ry1)
+{
+    int tx, ty;
+
+    for (ty = ry0 / 16; ty < (ry1 + 15) / 16; ty++) {
+        if (ty < 0 || ty >= (int)TILE_ROWS)
+            continue;
+        for (tx = rx0 / 16; tx < (rx1 + 15) / 16; tx++) {
+            uint32_t t;
+
+            if (tx < 0 || tx >= (int)TILE_COLS)
+                continue;
+            t = (uint32_t)(ty * (int)TILE_COLS + tx);
+            tile_sum[t] = 0u;
+            tile_xor[t] = 0u;
+            tile_written[t] = 1u;
+        }
+    }
+}
+
+static void tile_feed_byte(uint8_t b)
+{
+    uint32_t t;
+
+    if (!tile_half) {
+        tile_hi = b;
+        tile_half = 1u;
+        return;
+    }
+    tile_half = 0u;
+    if (tile_w > 0 && tile_x >= tile_x0 && tile_x < tile_x0 + tile_w &&
+        tile_y >= tile_y0 && tile_y < 80) {
+        t = (uint32_t)((tile_y >> 4) * (int)TILE_COLS + (tile_x >> 4));
+        if (t < TILE_N) {
+            tile_sum[t] += (uint32_t)tile_hi * 3u + (uint32_t)b + 1u;
+            tile_xor[t] ^= ((uint32_t)tile_hi << 8) | (uint32_t)b;
+            tile_written[t] = 1u;
+        }
+    }
+    tile_x++;
+    if (tile_w > 0 && tile_x >= tile_x0 + tile_w) {
+        tile_x = tile_x0;
+        tile_y++;
+    }
+}
+
+/* 所有送屏的像素都必须经过这里，才能边写边累积分块签名 */
+static void stream_write(const uint8_t *p, uint32_t n)
+{
+    uint32_t i;
+
+    for (i = 0; i < n; i++)
+        tile_feed_byte(p[i]);
+    lcd_raw_write(p, n);
+}
+
 static void stage_flush(void)
 {
     TRACE_STAGE(5u);
     if (stage_len > 0u) {
         frame_px += (uint32_t)(stage_len >> 1);
-        lcd_raw_write(stage[stage_idx], stage_len);
+        stream_write(stage[stage_idx], stage_len);
         stage_len = 0u;
         stage_idx ^= 1u;
     }
@@ -538,9 +614,16 @@ static void handle_frame(const uint8_t *f)
                 win_px = (x1 > x0 && y1 > y0)
                        ? (uint32_t)(x1 - x0) * (uint32_t)(y1 - y0) : 0u;
                 lcd_stream_begin(x0, y0, x1, y1);
+                tile_x0 = x0;
+                tile_y0 = y0;
+                tile_x = x0;
+                tile_y = y0;
+                tile_w = x1 - x0;
+                tile_half = 0u;
+                tile_reset_region(x0, y0, x1, y1);
                 return;
             case 0x08:
-                lcd_raw_write(seg, (uint32_t)((f[3] << 8) | f[4]));
+                stream_write(seg, (uint32_t)((f[3] << 8) | f[4]));
                 return;
             case 0x0Du:                          /* 压缩段：f[5]=1 行程编码 */
                 stage_flush();
@@ -549,7 +632,7 @@ static void handle_frame(const uint8_t *f)
                 raw_left = (uint32_t)((f[3] << 8) | f[4]);
                 return;
             case 0x0Cu:
-                if (stage_len > 0u) { lcd_raw_write(stage[stage_idx], stage_len); stage_len = 0u; stage_idx ^= 1u; }
+                if (stage_len > 0u) { stream_write(stage[stage_idx], stage_len); stage_len = 0u; stage_idx ^= 1u; }
                 rle_mode = 0u;               /* 原样段：必须关掉上一段的行程解码 */
                 rle_n = 0u;
                 raw_left = (uint32_t)((f[3] << 8) | f[4]);
@@ -557,7 +640,7 @@ static void handle_frame(const uint8_t *f)
             case 0x09: {
                 uint32_t frame_px_before = frame_px;
                 uint32_t win_px_before = win_px;
-                if (stage_len > 0u) { lcd_raw_write(stage[stage_idx], stage_len); stage_len = 0u; stage_idx ^= 1u; }
+                if (stage_len > 0u) { stream_write(stage[stage_idx], stage_len); stage_len = 0u; stage_idx ^= 1u; }
                 lcd_raw_idle();
                 win_px = 0u;      /* 完整性色块已移除：像素对不对由裁决字节告诉上位机 */
                 frame_px = 0u;
@@ -620,6 +703,15 @@ static void handle_frame(const uint8_t *f)
         if (sub == 0x0Bu) {                    /* 读开机自检结果 */
             r[0] = 0x0Au; r[1] = 0x0Bu;
             r[2] = g_boot_report;
+            r[3] = 0u; r[4] = 0u; r[5] = 0u;
+            usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x11u) {                    /* 分块签名核对：先回“开始收”，再收 100 字节 */
+            sig_rx = 1u;
+            sig_left = (uint16_t)(TILE_N * 2u);
+            sig_pos = 0u;
+            r[0] = 0x0Au; r[1] = 0x11u; r[2] = 0x06u;
             r[3] = 0u; r[4] = 0u; r[5] = 0u;
             usb_write(r, 6);
             return;
@@ -1088,6 +1180,48 @@ int main(void)
                         }
                     }
                     stall = 0u;
+                    continue;
+                }
+
+                if (sig_rx) {
+                    uint32_t take = (uint32_t)(rx_len - pos);
+                    uint32_t i;
+
+                    if (take > (uint32_t)sig_left)
+                        take = (uint32_t)sig_left;
+                    for (i = 0; i < take; i++)
+                        sig_buf[sig_pos + (uint8_t)i] = rx[pos + (int)i];
+                    sig_pos = (uint8_t)(sig_pos + (uint8_t)take);
+                    sig_left = (uint16_t)(sig_left - (uint16_t)take);
+                    pos += (int)take;
+                    stall = 0u;
+                    if (sig_left == 0u) {
+                        uint8_t rep[9];
+                        uint8_t bit;
+
+                        sig_rx = 0u;
+                        rep[0] = 0x0Au;
+                        rep[1] = 0x11u;
+                        rep[2] = 0u;
+                        rep[3] = 0u;
+                        rep[4] = 0u;
+                        rep[5] = 0u;
+                        rep[6] = 0u;
+                        rep[7] = 0u;
+                        rep[8] = 0xAAu;
+                        for (bit = 0u; bit < (uint8_t)TILE_N; bit++) {
+                            uint16_t want = (uint16_t)(sig_buf[bit * 2u] |
+                                                       ((uint16_t)sig_buf[bit * 2u + 1u] << 8));
+                            uint16_t got = (uint16_t)(tile_sum[bit] ^ tile_xor[bit]);
+
+                            if (want != got) {
+                                uint8_t idx = (uint8_t)(bit / 8u);
+                                if (idx < 7u)
+                                    rep[2u + idx] = (uint8_t)(rep[2u + idx] | (1u << (bit % 8u)));
+                            }
+                        }
+                        usb_write(rep, 9);
+                    }
                     continue;
                 }
 
