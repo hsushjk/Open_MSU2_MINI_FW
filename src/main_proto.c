@@ -50,7 +50,7 @@ static void standby_tick(void);
 static void iwdg_feed(void);
 
 /* ---------- 复位原因面包屑 ----------
- * 0x20004F00 是 RAM 顶部（.bss 之外、栈底之下）的 16 字节，不复位电源就跨复位保留。
+ * 放在链接脚本的 .noinit 段（RAM 最底部，不加载、不清零），不复位电源就跨复位保留。
  * 每次走到关键阶段就记一个码；异常复位（看门狗/硬件错）后这个码还留着，
  * 上位机一问就知道"上次是死在哪一步"。
  *   1=main 开始  2=usb_init 完成  3=开机画面  4=主循环  5=收像素
@@ -64,7 +64,9 @@ typedef struct {
     uint32_t aux;
 } trace_t;
 
-#define TRACE ((volatile trace_t *)0x20004F00u)
+static volatile trace_t g_trace __attribute__((section(".noinit")));
+
+#define TRACE (&g_trace)
 #define TRACE_STAGE(s) (TRACE->stage = (uint32_t)(s))
 
 static void trace_boot(void)

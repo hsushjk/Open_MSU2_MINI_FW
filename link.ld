@@ -25,6 +25,16 @@ SECTIONS
         . = ALIGN(4);
     } > FLASH
 
+    /* 复位面包屑：.noinit 不加载、也不在 .bss 里，启动代码不会碰它。
+     * 放在 RAM 最底部，离栈顶（_stack_top）最远，绝不会被栈踩到。 */
+    .noinit (NOLOAD) : {
+        . = ALIGN(4);
+        _snoinit = .;
+        *(.noinit .noinit.*)
+        . = ALIGN(4);
+        _enoinit = .;
+    } > RAM
+
     .data : {
         _sdata = .;
         *(.data .data.*)
