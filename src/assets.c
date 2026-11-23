@@ -126,6 +126,13 @@ void asset_feed(const uint8_t *src, int n)
         wr_flush_page();
 }
 
+void asset_abort(void)
+{
+    wr_active = 0u;
+    wr_left = 0u;
+    wr_fill = 0u;
+}
+
 int asset_writing(void)
 {
     return wr_active ? 1 : 0;

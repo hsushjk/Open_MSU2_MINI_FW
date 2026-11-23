@@ -62,6 +62,7 @@ uint32_t asset_max_len(void);
 void     asset_begin(uint8_t kind, uint8_t idx, uint32_t len);
 void     asset_feed(const uint8_t *src, int n);
 int      asset_writing(void);
+void     asset_abort(void);
 uint32_t asset_left(void);
 int      asset_finish(uint32_t expect_crc);
 void     asset_erase(uint8_t kind, uint8_t idx);
@@ -110,7 +111,7 @@ extern uint16_t usb_tx_len;
 extern uint8_t  cfg_selected;
 
 #ifndef FW_VER_MAJOR
-#define FW_VER_MAJOR  32u
+#define FW_VER_MAJOR  33u
 #endif
 #ifndef FW_VER_MINOR
 #define FW_VER_MINOR  0u

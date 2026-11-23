@@ -39,6 +39,8 @@ static settings_t g_settings;     /* NOR 里的设置：开机/待机模式 */
 static uint8_t    img_idx;        /* 待机轮播的当前张 */
 static uint8_t    asset_rx;       /* 1 = 正在收资产数据 */
 static uint32_t   asset_rx_left;  /* 还差多少字节 */
+static uint8_t    asset_win;       /* 1 = 分窗模式，收满一窗回一个 ack */
+static uint32_t   asset_last_tick; /* 上一次收到资产数据的时刻（防卡死） */
 
 static void standby_draw(void);
 static void standby_tick(void);
@@ -289,13 +291,32 @@ static void handle_frame(const uint8_t *f)
             lcd_raw_idle();
             standby_mode = 0u;
             asset_begin(f[2], f[3], len);
-            asset_rx = asset_writing();
-            asset_rx_left = len;
+            asset_rx = 0u;              /* 分窗模式：数据由 0A 08 一段一段喂 */
+            asset_rx_left = 0u;
+            asset_win = 0u;
+            asset_last_tick = systick_now();
             r[0] = 0x0Au; r[1] = 0x01u;
             r[2] = (uint8_t)(asset_rx ? 0x06u : 0x15u);
             r[3] = 0u; r[4] = 0u; r[5] = 0u;
             usb_write(r, 6);
             return;
+        }
+        if (sub == 0x08u) {                    /* 送来一段数据：len_hi len_lo，收满回 ack */
+            uint32_t wl = ((uint32_t)f[4] << 8) | (uint32_t)f[5];
+
+            if (wl == 0u || wl > 4096u)
+                wl = 4096u;
+            if (!asset_writing()) {
+                r[0] = 0x0Au; r[1] = 0x08u; r[2] = 0x15u;
+                r[3] = 0u; r[4] = 0u; r[5] = 0u;
+                usb_write(r, 6);
+                return;
+            }
+            asset_rx = 1u;
+            asset_rx_left = wl;
+            asset_win = 1u;
+            asset_last_tick = systick_now();
+            return;                        /* 收满了再回 ack */
         }
         if (sub == 0x02u) {                    /* 放弃这次写入 */
             asset_rx = 0u;
@@ -530,6 +551,14 @@ int main(void)
             }
         }
 
+        /* 资产写到一半没下文（主机崩了/线松了）：1 秒后作废，别把设备卡成哑巴 */
+        if (asset_rx && (uint32_t)(systick_now() - asset_last_tick) > 48000000u) {
+            asset_rx = 0u;
+            asset_rx_left = 0u;
+            asset_win = 0u;
+            asset_abort();
+        }
+
         if (rx_len > 0) {
             int pos = 0;
 
@@ -542,8 +571,15 @@ int main(void)
                     asset_feed(rx + pos, (int)take);
                     pos += (int)take;
                     asset_rx_left -= take;
-                    if (asset_rx_left == 0u)
+                    asset_last_tick = systick_now();
+                    if (asset_rx_left == 0u) {
                         asset_rx = 0u;
+                        if (asset_win) {
+                            static const uint8_t wack[6] = {0x0Au, 0x08u, 0x06u, 0u, 0u, 0u};
+                            asset_win = 0u;
+                            usb_write(wack, 6);
+                        }
+                    }
                     stall = 0u;
                     continue;
                 }
