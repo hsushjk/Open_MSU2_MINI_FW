@@ -468,6 +468,9 @@ static void standby_fade(uint8_t from, uint8_t to)
     asset_fade_open(1u, ASSET_STANDBY, to, 0u);
     fade_active = 1u;
 }
+/* 握手/心跳包：设备发 \0OPMSU，主机回 \0OKMSU。待机和淡入时也periodically 补发。 */
+static const uint8_t hello[6] = { 0x00, 0x4F, 0x50, 0x4D, 0x53, 0x55 };
+
 
 /* 推一条带子（640 B，混色 + 推屏 ≈ 3–10 ms）就返回，主循环靠它把整段淡入
  * 摊到 320 圈里。带子读完一条就 lcd_raw_idle()，既满足"读 NOR 前屏 CS 必须
@@ -495,6 +498,10 @@ static void standby_fade_step(void)
     lcd_raw_write(fade_a, 640);
     lcd_raw_idle();
     iwdg_feed();                    /* 单带 3–10 ms，远短于 IWDG 周期 */
+    /* 淡入期间 standby_wait 不涨，主循环里那条 hello 就永远轮不到；
+     * 主机恰好此时打开串口会等不到问候包。每 8 条带子补一次。 */
+    if ((fade_band & 7u) == 0u)
+        usb_write(hello, 6);
 
     if (++fade_band < FADE_BANDS)
         return;
@@ -696,9 +703,8 @@ static volatile uint32_t frame_done;
 static int x0, y0, x1, y1;
 static int connected;
 
-/* 自研握手串：\0OPMSU。主机看到它回 \0OKMSU；版本号不再编进握手，
+/* 自研握手串：\0OPMSU（见上方 hello 定义）。版本号不编进握手，
  * 只从 class 0 sub 0x56 的版本帧取（老主机仍按 \0MSN 兼容路走）。 */
-static const uint8_t hello[6] = { 0x00, 0x4F, 0x50, 0x4D, 0x53, 0x55 };
 static uint32_t hb_hold;		/* >0：暂缓心跳，给应答包让路 */
 
 static void seg_fill4(const uint8_t *p)
@@ -1139,8 +1145,12 @@ static void handle_frame(const uint8_t *f)
                 secs = 60u;
             g_settings.boot_hold = secs;
             (void)settings_save(&g_settings);
+            r[0] = 0x0Au;
+            r[1] = 0x09u;      /* 帧头必须与请求的 sub 一致，否则主机会一直等到超时 */
             r[2] = 0x06u;
             r[3] = secs;
+            r[4] = 0u;
+            r[5] = 0u;
             usb_write(r, 6u);
             return;
         }
