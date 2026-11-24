@@ -716,28 +716,30 @@ static void handle_frame(const uint8_t *f)
     }
 
     if (cls == 0x0Au) {                       /* 资产：开机/待机图 + 设置 */
-        uint8_t r[12];
+        uint8_t r[14];
 
-        if (sub == 0x00u || sub == 0x07u) {    /* 查询 */
+        if (sub == 0x00u || sub == 0x07u) {    /* 查询（14 字节，v1.0.0 起 16 槽） */
+            uint16_t mask = 0u;
+            uint8_t k;
+
             r[0] = 0x0Au;
             r[1] = sub;
             r[2] = (uint8_t)(asset_valid(ASSET_BOOT, 0u) ? 1u : 0u);
-            r[3] = 0u;
-            {
-                uint8_t k;
-                for (k = 0u; k < 8u; k++)
-                    if (asset_valid(ASSET_STANDBY, k))
-                        r[3] = (uint8_t)(r[3] | (1u << k));
-            }
-            r[4] = g_settings.boot_mode;
-            r[5] = g_settings.standby_mode;
-            r[6] = g_settings.standby_count;
-            r[7] = (uint8_t)((g_settings.dwell >> 8) & 0xFFu);
-            r[8] = (uint8_t)(g_settings.dwell & 0xFFu);
-            r[9] = FW_VER_MAJOR;
-            r[10] = g_settings.boot_hold;
-            r[11] = 0xAAu;
-            usb_write(r, 12);
+            for (k = 0u; k < STANDBY_SLOTS; k++)
+                if (asset_valid(ASSET_STANDBY, k))
+                    mask = (uint16_t)(mask | (uint16_t)(1u << k));
+            r[3] = (uint8_t)(mask & 0xFFu);
+            r[4] = (uint8_t)((mask >> 8) & 0xFFu);
+            r[5] = g_settings.boot_mode;
+            r[6] = g_settings.standby_mode;
+            r[7] = g_settings.standby_count;
+            r[8] = (uint8_t)((g_settings.dwell >> 8) & 0xFFu);
+            r[9] = (uint8_t)(g_settings.dwell & 0xFFu);
+            r[10] = FW_VER_MAJOR;
+            r[11] = g_settings.boot_hold;
+            r[12] = 0u;
+            r[13] = 0xAAu;
+            usb_write(r, 14);
             return;
         }
         if (sub == 0x0Bu) {                    /* 读开机自检结果 */

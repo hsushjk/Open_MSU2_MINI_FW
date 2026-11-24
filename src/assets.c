@@ -1,9 +1,11 @@
 /* 板载 NOR（P25D80H，1 MB）上的“资产”：开机画面 + 待机画面，外加一小块设置。
  *
- * 分区（32 KB 对齐，方便以后换压缩格式）：
- *   0x000000  开机画面   1 槽
- *   0x010000  待机画面   8 槽（0x010000 + idx * 0x8000）
- *   0x0FF000  设置区     32 字节
+ * 分区（NOR 1 MB）：
+ *   0x000000  开机画面   1 槽（32 KB 区，实占 20 B 头 + 25 600 B 像素）
+ *   0x008000  待机画面  16 槽（0x008000 + idx * 0x6800）
+ *   0x080000  应用镜像  自更新暂存区（见 selfupdate.c）
+ *   0x0A0000  更新标志  4 KB
+ *   0x0FF000  设置区    32 字节
  *
  * 每槽开头 16 字节头：
  *   'M''S''A''1' | w(2) | h(2) | fmt(1) | flags(1) | len(4) | crc32(4) | pad(2)
@@ -19,8 +21,8 @@
 #define CFG_MAGIC     0x3153324Du   /* "MS2S" */
 #define CFG_ADDR      0x0FF000u
 #define BOOT_ADDR     0x000000u
-#define STANDBY_BASE  0x010000u
-#define SLOT_SIZE     0x00008000u
+#define STANDBY_BASE  0x008000u
+#define SLOT_SIZE     0x00006800u
 #define HDR_SIZE      20u
 #define PAGE_SIZE     256u
 
@@ -33,7 +35,7 @@ static uint32_t wr_left;
 static uint32_t wr_crc;
 static uint8_t  wr_buf[PAGE_SIZE];
 static uint32_t wr_fill;
-static uint8_t  slot_ok;        /* 待机槽的“已校验”位图 */
+static uint16_t slot_ok;        /* 待机槽的“已校验”位图（16 槽） */
 static uint8_t  boot_ok;        /* 开机图已校验 */
 
 static void put32(uint8_t *p, uint32_t v)
@@ -210,7 +212,7 @@ int asset_valid(uint8_t kind, uint8_t idx)
     uint32_t crc = 0xFFFFFFFFu;
     uint32_t left;
     uint32_t addr;
-    uint8_t bit = (uint8_t)(1u << (idx & 7u));
+    uint16_t bit = (uint16_t)(1u << (idx & 15u));
 
     if (!hdr_ok(kind, idx))
         return 0;
@@ -240,7 +242,7 @@ int asset_valid(uint8_t kind, uint8_t idx)
     if (kind == 0u)
         boot_ok = 1u;
     else
-        slot_ok = (uint8_t)(slot_ok | bit);
+        slot_ok = (uint16_t)(slot_ok | bit);
     return 1;
 }
 

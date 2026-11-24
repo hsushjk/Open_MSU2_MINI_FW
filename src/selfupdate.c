@@ -18,7 +18,7 @@
 
 #include "fw.h"
 
-#define APPIMG_ADDR   0x060000u
+#define APPIMG_ADDR   0x080000u
 #define APPIMG_HDR    16u
 #define APPIMG_MAGIC0 'M'
 #define APPIMG_MAGIC1 'S'
@@ -162,7 +162,7 @@ int update_stage_commit(uint32_t crc)
 }
 
 /* “请更新”标志单独放在自己的 4 KB 扇区，写它不用碰镜像头 */
-#define APPLY_FLAG_ADDR 0x070000u
+#define APPLY_FLAG_ADDR 0x0A0000u
 
 void update_set_apply_flag(void)
 {
