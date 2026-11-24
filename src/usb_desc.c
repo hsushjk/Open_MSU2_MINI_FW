@@ -1,13 +1,11 @@
-﻿/* 描述符表：干净的双接口 CDC-ACM，不含原厂的 HID 接口。
- * 原厂表是 CDC + CDC 数据 + HID 三接口复合设备，我们并不实现 HID 端点，
- * Windows 拉起 HID 驱动后必然失败，所以这里只暴露串口。
- */
+/* 描述符表：干净的双接口 CDC-ACM，不暴露 HID 接口。
+ * 设备只有 CDC 控制 + CDC 数据两个接口，主机据此只加载串口驱动。 */
 #include <stdint.h>
 #include "usb_desc.h"
 
 static const uint8_t usb_device_desc[18] = {
     0x12, 0x01, 0x10, 0x01, 0x02, 0x00, 0x00, 0x40,
-    0x86, 0x1A, 0x0D, 0xFE, 0x00, 0x01,
+    0x86, 0x1A, 0x0D, 0xFE, 0x09, 0x01,
     0x01, 0x02, 0x03, 0x01
 };
 
@@ -33,8 +31,6 @@ static const uint8_t usb_config_desc[67] = {
     /* EP3 IN 批量 */
     0x07, 0x05, 0x83, 0x02, 0x40, 0x00, 0x00
 };
-
-static const uint8_t usb_report_desc[4] = { 0x05, 0x01, 0xC0, 0x00 };
 
 static const uint8_t usb_string_langid[4] = { 0x04, 0x03, 0x09, 0x04 };
 
@@ -78,9 +74,6 @@ const uint8_t *usb_desc_get(uint8_t type, uint8_t index, uint16_t *len)
         default:
             return 0;
         }
-    case 0x22:
-        *len = sizeof(usb_report_desc);
-        return usb_report_desc;
     default:
         return 0;
     }

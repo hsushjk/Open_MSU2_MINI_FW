@@ -1,9 +1,5 @@
 /* LCD driver for the 0.96" 160x80 ST7735S panel on MSU2_MINI.
  *
- * Written from the reconstructed firmware (see ../decompiled/lcd.c in the
- * reverse-engineering repository) rather than from the ST7735S datasheet, so
- * that the register-level behaviour matches the vendor image exactly:
- *
  *   - SPI1, master, 8-bit, mode 3, software NSS, fPCLK/2 = 24 MHz
  *   - CS  = PC3      D/C = PA6      RESET = PA0 (J1.3)
  *   - pixel bursts go through DMA1 channel 3, 256 bytes at a time
@@ -20,6 +16,8 @@
 #define LCD_RST    0x001u   /* PA0, J1.3 */
 
 #define VAR_Y 24
+#define LCD_W 160
+#define LCD_H 80
 
 static uint8_t line[256];
 
@@ -100,11 +98,8 @@ void lcd_data16(uint16_t value)
     cs_set(1);
 }
 
-/* 1 ms 的忙等。
- *
- * 3000 次是早期估的数，实测偏慢约 1.7 倍（设定 4 秒实际 7 秒、设定 10 秒实际 17 秒），
- * 于是待机闪烁、开机停留、断开回待机的计时统统被拉长。这里按实测改成 1490 次（设定 3 秒实际 3.5 秒，再缩 1.18 倍）。
- * 只影响空闲/待机里的“等一会儿”，不影响 USB 收发——那一路是中断 + 环形缓冲。
+/* 1 ms 的忙等：1490 次空循环约等于 1 ms（48 MHz 时钟下）。
+ * 只用于空闲/待机里的等待，不影响 USB 收发——那一路是中断加环形缓冲。
  */
 #define DELAY_MS_LOOPS  1490u
 
@@ -123,8 +118,6 @@ static void spi_dma_setup(void)
     DMA1_CH3->CFGR = DMA_CFGR_DIR | DMA_CFGR_MINC;
 }
 
-volatile uint16_t g_dma_to;
-
 static int dma_wait_done(uint32_t len)
 {
     uint32_t guard = len * 200u + 100000u;
@@ -132,7 +125,6 @@ static int dma_wait_done(uint32_t len)
         if (--guard == 0u) {
             DMA1_CH3->CFGR &= ~DMA_CFGR_EN;
             DMA1->INTFCR = DMA_TCIF3;
-            g_dma_to++;
             return 0;
         }
     }
@@ -191,10 +183,21 @@ void lcd_set_window(int x0, int y0, int x1, int y1)
 
 void lcd_fill(int x, int y, int w, int h, uint16_t colour)
 {
-    uint32_t pixels = (uint32_t)w * (uint32_t)h;
+    uint32_t pixels;
     uint32_t n, i;
     uint8_t hi = (uint8_t)(colour >> 8);
     uint8_t lo = (uint8_t)colour;
+
+    /* 防御性收边：宽高可能越界或为负，先裁到面板内再算像素数；
+     * 否则 w*h 会溢出成几十亿，主循环卡在 DMA 里来不及喂看门狗。 */
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x >= LCD_W || w <= 0) return;
+    if (y >= LCD_H || h <= 0) return;
+    if (w > LCD_W - x) w = LCD_W - x;
+    if (h > LCD_H - y) h = LCD_H - y;
+
+    pixels = (uint32_t)w * (uint32_t)h;
 
     lcd_set_window(x, y, x + w - 1, y + h - 1);
 
@@ -217,25 +220,8 @@ void lcd_fill(int x, int y, int w, int h, uint16_t colour)
     cs_set(1);
 }
 
-/* 把一块 RGB565 像素推给面板。数据按字节给出，每个像素高字节在前，
- * 与面板要求一致；调用方保证传输长度不超过 65535 字节（DMA 计数是 16 位）。 */
-void lcd_blit(int x, int y, int w, int h, const uint8_t *bytes_pixels)
-{
-    uint32_t bytes = (uint32_t)w * (uint32_t)h * 2u;
-
-    if (bytes == 0 || bytes > 0xFFFFu)
-        return;
-
-    lcd_set_window(x, y, x + w - 1, y + h - 1);
-
-    cs_set(0);
-    dc_set(1);
-    dma_send(bytes_pixels, bytes);
-    cs_set(1);
-}
-
-/* 直接把一段字节当像素推给面板：不重设窗口，由之前的命令决定落在哪里。
- * 原厂 lcd_stream 就是"拉低片选 -> DMA -> 拉高片选"，窗口在整帧开始时设一次。 */
+/* 直接把一段字节当像素推给面板：不重设窗口，落点由窗口设置命令决定。
+ * 窗口在整帧开始时设一次，之后每段只是"拉低片选 -> DMA -> 拉高片选"。 */
 void lcd_raw_write(const uint8_t *p, uint32_t n)
 {
     if (n == 0 || n > 0xFFFFu)
@@ -261,17 +247,25 @@ void lcd_raw_idle(void)
  * 之后每段只需推字节，不再重设窗口。 */
 void lcd_stream_begin(int x, int y, int x2, int y2)
 {
-    /* 协议里的 x2/y2 是排他终点（set_size 传的是宽高累加值），
-     * lcd_set_window 要的是闭区间终点，所以各减一。原厂 op 7 也是这么写的：
-     * lcd_draw_hline(x0, y0, x1 - 1, y1 - 1)。 */
+    /* x2/y2 是排他终点（set_size 传的是宽高累加值），lcd_set_window 要的是
+     * 闭区间终点，所以各减一。这里再收一次边，保证窗口非空且落在面板内。 */
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > LCD_W - 1) x = LCD_W - 1;
+    if (y > LCD_H - 1) y = LCD_H - 1;
+    if (x2 <= x) x2 = x + 1;
+    if (y2 <= y) y2 = y + 1;
+    if (x2 > LCD_W) x2 = LCD_W;
+    if (y2 > LCD_H) y2 = LCD_H;
+
     dma_finish();
     lcd_set_window(x, y, x2 - 1, y2 - 1);
     dc_set(1);
     cs_set(0);
 }
 
-/* PA6 同时是 flash 的 MISO 与面板的 D/C。读 flash 之前必须把它切成输入，
- * 否则 MCU 会一边输出一边读，取回的是自己的电平。原厂固件也是这么切换的。 */
+/* PA6 同时是 flash 的 MISO 与面板的 D/C：读 flash 之前必须把它切成输入，
+ * 否则 MCU 会一边输出一边读，取回的是自己的电平。 */
 void lcd_dc_as_input(void)
 {
     gpio_mode(GPIOA, 0x040u, GPIO_MODE_IN_FLOAT);
@@ -288,7 +282,7 @@ void gpio_mode(GPIO_TypeDef *port, uint32_t pins, uint32_t nibble)
     uint32_t shift;
 
     /* 引脚 0..7 在 CFGLR，8..15 在 CFGHR，16..23 在 CFGXR（每脚 4 位）。
-       原实现只循环到 15，PC16/PC17（USB D-/D+）从来没被配置过。 */
+       PC16/PC17（USB D-/D+）在 CFGXR 里，所以循环必须覆盖到 23。 */
     for (shift = 0; shift < 24; shift++) {
         if (pins & (1u << shift)) {
             uint32_t reg;
@@ -453,7 +447,7 @@ void lcd_init(void)
     lcd_command(0x2C);
 }
 
-/* 粗略的短延时，1 个循环约 3 个时钟 */
+/* 粗略的短延时，循环体每次约 4 个时钟（含 volatile 读写） */
 void delay_cycles(uint32_t n)
 {
     volatile uint32_t i;

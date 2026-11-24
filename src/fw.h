@@ -14,7 +14,6 @@ void spi_flush(void);
 /* ---- 时钟 / 面板 ---- */
 void board_clock_init(void);
 void lcd_gpio_init(void);
-extern volatile uint16_t g_dma_to;
 
 void lcd_init(void);
 void lcd_command(uint8_t cmd);
@@ -24,7 +23,6 @@ void lcd_fill(int x, int y, int w, int h, uint16_t colour);
 void boot_screen_begin(void);
 void boot_screen_row(uint8_t row, uint8_t state);
 void boot_screen_done(uint8_t passed, uint8_t total);
-void lcd_blit(int x, int y, int w, int h, const uint8_t *bytes_pixels);
 void lcd_set_window(int x0, int y0, int x1, int y1);
 void lcd_stream_begin(int x, int y, int x2, int y2);
 void lcd_raw_write(const uint8_t *p, uint32_t n);
@@ -43,24 +41,22 @@ uint8_t flash_read_status(void);
 int     flash_wait_ready(uint32_t spin);
 void    flash_read(uint32_t addr, uint8_t *dst, int n);
 void    flash_wren(void);
-void    flash_program(uint32_t addr, const uint8_t *src, int n);
+int     flash_program(uint32_t addr, const uint8_t *src, int n);
 void    flash_erase_4k(uint32_t addr);
 int     flash_erase_chip_now(void);
 int     flash_is_blank(uint32_t addr, int n);
 
 /* ---- 免拆自更新（selfupdate.c） ---- */
-/* 内部 flash 体检页：应用区只到 0xEFFF（link.ld 里 60 KB 且有 ASSERT），
- * 所以体检只能用 0xF000 这一页；原来的 0x7000 落在应用区里，固件一大
- * 体检就会把正在跑的代码擦掉。OTA 的 update_apply() 和 0A 17 的
- * update_probe() 都必须用这一个地址。 */
+/* 内部 flash 体检页：应用区最大到 0xEFFF（link.ld 里 FLASH 60 KB 且有 ASSERT），
+ * 所以体检只能用 0xF000 这一页，它不能落在应用区里（否则会擦掉正在跑的代码）。 */
 #define IFLASH_PROBE_ADDR 0xF000u
 int  update_stage_begin(uint32_t len);
 void update_stage_feed(const uint8_t *src, int n);
+int  update_stage_ready(void);        /* 1 = 本次上电成功 begin 过，可接收窗口数据 */
 int  update_stage_commit(uint32_t crc);
 void update_set_apply_flag(void);
 void update_clear_apply_flag(void);
 int  update_apply(void);
-int  update_probe(void);
 extern volatile uint8_t g_up_result;   /* last update result: 0 ok, 1..4 failure stage */
 
 /* ---- CRC32（逐位实现，不查表，省 flash） ---- */
@@ -70,7 +66,7 @@ uint32_t asset_crc32_bytes(uint32_t crc, const uint8_t *p, int n);
 /* ---- 资产：开机 / 待机画面，设置块 ---- */
 typedef struct {
     uint8_t  boot_mode;      /* 0=不画 1=画 NOR 里的开机图 */
-    uint8_t  standby_mode;   /* 0=黑屏 1=四角方块 2=图片轮播 3=弹球 4=呼吸 */
+    uint8_t  standby_mode;   /* 0=黑屏 1=四角方块 2=图片轮播 3=弹球 */
     uint8_t  standby_count;  /* 轮播图片张数 1..16（只在前 N 个槽循环） */
     uint16_t dwell;          /* 每张停留秒数 */
     uint8_t  boot_hold;      /* 开机画面停留秒数 1..60（0 当作 4） */
@@ -88,7 +84,6 @@ void     asset_begin(uint8_t kind, uint8_t idx, uint32_t len, uint8_t fmt);
 void     asset_feed(const uint8_t *src, int n);
 int      asset_writing(void);
 void     asset_abort(void);
-uint32_t asset_left(void);
 int      asset_finish(uint32_t expect_crc);
 void     asset_erase(uint8_t kind, uint8_t idx);
 int      asset_valid(uint8_t kind, uint8_t idx);
@@ -121,33 +116,17 @@ void usb_init(void);
 void usb_gpio_init(void);
 int  usb_read(uint8_t *dst, int max);
 int  usb_write(const uint8_t *src, int len);
-int  usb_take_greeting(uint8_t *dst);
 void usb_service(void);
-void usb_pump(void);
 
 extern volatile uint32_t usb_reset_count;
-extern volatile uint32_t usb_ep2_drop;
-extern volatile uint32_t usb_packet_count;
-extern volatile uint32_t usb_req_count;
 extern volatile uint32_t usb_irq_count;
 extern volatile uint32_t usb_setup_count;
 extern volatile uint32_t usb_suspend_count;
-extern volatile uint32_t g_loop_count;
 extern volatile uint32_t usb_in_count;
 extern volatile uint32_t usb_out_count;
 extern volatile uint32_t usb_rx_stall;
-extern volatile uint16_t usb_last_len;
-extern volatile uint8_t  usb_last_b0;
-extern volatile uint8_t  usb_last_b1;
 extern volatile uint32_t usb_other_count;
-extern volatile uint8_t  usb_last_fg;
-extern volatile uint8_t  usb_last_st;
 extern volatile uint8_t  ep3_busy;
-extern uint8_t  usb_req_log[16];
-extern uint8_t  usb_req_type[16];
-extern uint8_t  usb_setup_snap[4];
-extern uint8_t  usb_tx_snap[8];
-extern uint16_t usb_tx_len;
 extern uint8_t  cfg_selected;
 
 #ifndef FW_VER_MAJOR
@@ -157,7 +136,7 @@ extern uint8_t  cfg_selected;
 #define FW_VER_MINOR  0u
 #endif
 #ifndef FW_VER_PATCH
-#define FW_VER_PATCH  13u
+#define FW_VER_PATCH  9u
 #endif
 
 #endif /* FW_H */

@@ -1,8 +1,8 @@
-﻿/* P25D80H（1 MB SPI NOR）最小驱动：只为擦除而写。
+/* P25D80H（1 MB SPI NOR）最小驱动：读数据、页编程、扇区擦除、整片擦除。
  *
- * 命令取自原厂实现（decompiled/flash.c）：
- *   0x06 写使能, 0x05 读状态, 0x03 读数据, 0x20 4 KB 扇区擦除, 0xC7 整片擦除
- * 片选是 PB7，与原厂固件一致。
+ *   0x06 写使能, 0x05 读状态, 0x03 读数据, 0x02 页编程,
+ *   0x20 4 KB 扇区擦除, 0xC7 / 0x60 整片擦除
+ * 片选是 PB7。SPI1 与 LCD 共用，事务开始前先让屏幕 DMA 收尾。
  */
 
 #include "fw.h"
@@ -14,6 +14,9 @@ static void cs_flash(int level)
     if (level)
         GPIOB->BSHR = FLASH_CS;
     else {
+        /* SPI1 与屏共用：可能还有一笔像素 DMA 在飞。先把它等完，
+         * 否则 NOR 事务会把最后一个数据段截断，屏上留下残像。 */
+        lcd_stream_wait();
         spi_flush();
         GPIOB->BCR = FLASH_CS;
     }
@@ -72,9 +75,12 @@ void flash_read(uint32_t addr, uint8_t *dst, int n)
 }
 
 
-/* 页编程：每页 256 字节，跨页自动切开；每页都要重新写使能。 */
-void flash_program(uint32_t addr, const uint8_t *src, int n)
+/* 页编程：每页 256 字节，跨页自动切开；每页都要重新写使能。
+ * 返回 1 表示每页都等到了 WIP 清零，返回 0 表示有页超时（内容不可信）。 */
+int flash_program(uint32_t addr, const uint8_t *src, int n)
 {
+    int ok = 1;
+
     while (n > 0) {
         int page = 256 - (int)(addr & 0xFFu);
         int i;
@@ -90,11 +96,14 @@ void flash_program(uint32_t addr, const uint8_t *src, int n)
         for (i = 0; i < page; i++)
             spi_byte(src[i]);
         cs_flash(1);
-        flash_wait_ready(200000u);
+        if (!flash_wait_ready(200000u))
+            ok = 0;
         addr += (uint32_t)page;
         src += page;
         n -= page;
     }
+
+    return ok;
 }
 
 void flash_erase_4k(uint32_t addr)
@@ -111,7 +120,7 @@ void flash_erase_4k(uint32_t addr)
 
 /* 整片擦除：发 0xC7 后必须等到内部完成，否则紧接着的操作会被忽略。
  * 1 MB 全片擦除典型 1~2 秒，flash_wait_ready 里边等边喂看门狗。
- * 有些批次的片子只认 0x60，抽查中段不干净就再补一次。 */
+ * 有些批次的片子只认 0x60；若 0xC7 之后中段还不是全 0xFF，就再补一次。 */
 static int flash_chip_erase_once(uint8_t cmd)
 {
     flash_wren();

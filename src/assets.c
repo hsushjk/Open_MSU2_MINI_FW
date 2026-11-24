@@ -10,7 +10,7 @@
  * 每槽开头 20 字节头：
  *   'M''S''A''1' | w(2) | h(2) | fmt(1) | flags(1) | len(4) | crc32(4) | pad(2)
  * 之后是 len 字节数据。fmt 决定数据格式：
- *   fmt=0 裸 RGB565，高字节在前，len 固定 25 600（老图，仍能画）
+ *   fmt=0 裸 RGB565，高字节在前，len 固定 25 600
  *   fmt=1 RLE，3 字节一包 [cnt, hi, lo]，与屏流 rle_feed 同一套；
  *         cnt 是 1..255 的重复像素数（0 = 0 个像素，编码器不会发），
  *         len 是压缩后长度，crc32 也算压缩数据。
@@ -45,6 +45,7 @@ static uint32_t wr_crc;
 static uint8_t  wr_buf[PAGE_SIZE];
 static uint32_t wr_fill;
 static uint8_t  wr_fmt;         /* 本槽数据的格式（0=RGB565，1=RLE） */
+static uint8_t  wr_err;         /* 本槽写入过程中出现过 NOR 编程超时 */
 static uint16_t slot_ok;        /* 待机槽的“已校验”位图（16 槽） */
 static uint8_t  boot_ok;        /* 开机图已校验 */
 
@@ -87,7 +88,8 @@ static void wr_flush_page(void)
 {
     if (wr_fill == 0u)
         return;
-    flash_program(wr_addr, wr_buf, (int)wr_fill);
+    if (!flash_program(wr_addr, wr_buf, (int)wr_fill))
+        wr_err = 1u;                 /* 交给 asset_finish 统一上报 */
     wr_addr += wr_fill;
     wr_fill = 0u;
 }
@@ -120,6 +122,7 @@ void asset_begin(uint8_t kind, uint8_t idx, uint32_t len, uint8_t fmt)
     wr_left = len;
     wr_fill = 0u;
     wr_crc = 0xFFFFFFFFu;
+    wr_err = 0u;
     wr_active = 1u;
     slot_ok = 0u;
     boot_ok = 0u;
@@ -149,6 +152,7 @@ void asset_abort(void)
     wr_active = 0u;
     wr_left = 0u;
     wr_fill = 0u;
+    wr_err = 0u;
 }
 
 int asset_writing(void)
@@ -156,22 +160,19 @@ int asset_writing(void)
     return wr_active ? 1 : 0;
 }
 
-uint32_t asset_left(void)
-{
-    return wr_left;
-}
-
 int asset_finish(uint32_t expect_crc)
 {
     uint32_t crc = wr_crc ^ 0xFFFFFFFFu;
     uint8_t hdr[HDR_SIZE];
+    uint8_t back[HDR_SIZE];
     uint32_t base;
+    uint32_t i;
 
     if (!wr_active)
         return 0;
     wr_flush_page();
     wr_active = 0u;
-    if (wr_left != 0u || crc != expect_crc)
+    if (wr_left != 0u || wr_err || crc != expect_crc)
         return 0;
 
     base = asset_slot_addr(wr_kind, wr_idx);
@@ -182,7 +183,15 @@ int asset_finish(uint32_t expect_crc)
     hdr[9] = 0u;
     put32(hdr + 10, wr_len);
     put32(hdr + 14, crc);
-    flash_program(base, hdr, (int)HDR_SIZE);
+    if (!flash_program(base, hdr, (int)HDR_SIZE))
+        return 0;
+
+    /* 头是所有后续读取的入口，写完必须读回确认，否则这个槽等于坏的 */
+    flash_read(base, back, (int)HDR_SIZE);
+    for (i = 0u; i < HDR_SIZE; i++) {
+        if (back[i] != hdr[i])
+            return 0;
+    }
     return 1;
 }
 
@@ -233,7 +242,7 @@ uint8_t asset_format(uint8_t kind, uint8_t idx)
 }
 
 /* 校验 CRC（读一整帧≈25 KB，只在需要时做，结果缓存在 slot_ok 里） */
-/* 整片擦除后，之前缓存的“哪个槽有图”全部失效 */
+/* 整片擦除后，缓存的“哪个槽有图”全部失效 */
 void asset_invalidate(void)
 {
     slot_ok = 0u;

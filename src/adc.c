@@ -1,9 +1,8 @@
 // ADC / 触摸（CH32X035 的 TouchKey 复用 ADC1 寄存器）
-// 完全按原厂 adc_init @0x2BCC 与 adc_read @0x2C58 的做法：
-//   CTLR1 的 bit24 是 TKENABLE（触摸键模式使能，不是普通 ADC 位），
-//   转换不是靠 SWSTART，而是写 IDATAR1=0x70、RDATAR=0x40 后轮询 STATR。
-//   注意：原厂 sub_3D5C(ADC1->STATR, 2) 测的是 bit1 = EOC，不是 bit2 = JEOC；
-//   只等 JEOC 会一直等到超时，读到的是没更新的旧值（表现为基准恒定、触摸无反应）。
+// 触摸键模式：CTLR1 的 bit24 是 TKENABLE（触摸键模式使能，不是普通 ADC 位）；
+// 转换不是靠 SWSTART，而是写 IDATAR1=0x70、RDATAR=0x40 后轮询 STATR。
+// 转换完成判据是 STATR 的 bit1（EOC），不是 bit2（JEOC）；
+// 只等 JEOC 会一直等到超时，读到的是没有更新的值（表现为基准恒定、触摸无反应）。
 #include "fw.h"
 
 #define ADC1_BASE  0x40012400u
@@ -21,7 +20,7 @@
 
 #define ADC_CTLR2_ADON  (1u << 0)
 #define ADC_CTLR1_TKEN  (1u << 24)   /* TKEN mode enable */
-#define ADC_STATR_EOC   (1u << 1)    /* 规则通道转换完成（原厂等的就是这个） */
+#define ADC_STATR_EOC   (1u << 1)    /* 规则通道转换完成 */
 #define ADC_STATR_JEOC  (1u << 2)    /* 注入通道转换完成 */
 #define ADC_STATR_DONE  (ADC_STATR_EOC | ADC_STATR_JEOC)
 
@@ -38,7 +37,7 @@ void adc_init(void)
     for (i = 0; i < 20000u; i++)
         ;
 
-    ADCR(ADC_CTLR1) |= ADC_CTLR1_TKEN;                          /* 原厂：CTLR1 |= 0x1000000 */
+    ADCR(ADC_CTLR1) |= ADC_CTLR1_TKEN;                          /* 触摸键模式 */
 }
 
 /* 采样时间取最长的 239.5 周期（3 位编码 7）：触摸电极面积小、阻抗高 */
@@ -63,18 +62,21 @@ uint16_t adc_read(uint8_t ch)
 {
     static uint8_t  s_busy;
     static uint8_t  s_ch = 0xFFu;
-    static uint16_t s_value;
+    static uint16_t s_value[18];        /* 每个通道各自保留最近一次结果 */
     uint32_t v;
 
+    if (ch > 17u)                       /* CH32X033 只有 0..17 号通道 */
+        return 0;
+
     /* 触摸键的充电/放电转换要几毫秒，原地等就会把 USB 端点拖到超时
-       （主机侧表现：卡顿、整帧写截断、花屏）。所以采用“先取上次结果、
-       再启动本次”的方式：同一通道连续采样时完全不阻塞。 */
+       （主机侧表现：卡顿、整帧写截断、花屏）。所以采用"先取上次结果、
+       再启动本次"的方式：同一通道连续采样时完全不阻塞。 */
     if (s_busy && ch == s_ch) {
         if (!(ADCR(ADC_STATR) & ADC_STATR_DONE))
-            return s_value;                 /* 还没转换完，先给上一拍的值 */
+            return s_value[ch];         /* 还没转换完，先给本通道上一拍的值 */
         v = ADCR(ADC_RDATAR);
         ADCR(ADC_STATR) = 0u;
-        s_value = (uint16_t)(v & 0x0FFFu);
+        s_value[ch] = (uint16_t)(v & 0x0FFFu);
         s_busy = 0u;
     }
 
@@ -83,15 +85,10 @@ uint16_t adc_read(uint8_t ch)
     ADCR(ADC_IDATAR1) = 0x70u;
     ADCR(ADC_RDATAR) = 0x40u;
 
-    if (ch != s_ch) {
-        /* 切通道也不等：立即返回旧值，让下一拍去取。
-           一旦在这里等转换，主循环就会停数十毫秒，
-           期间 USB 接收环没人消费，整帧字节被静默丢弃。 */
-        s_ch = ch;
-        s_busy = 1u;
-        return s_value;
-    }
-
+    /* 切通道也不等：立即返回该通道上一次完成的值，让下一拍去取。
+       一旦在这里等转换，主循环就会停数十毫秒，
+       期间 USB 接收环没人消费，整帧字节被静默丢弃。 */
+    s_ch = ch;
     s_busy = 1u;
-    return s_value;
+    return s_value[ch];
 }

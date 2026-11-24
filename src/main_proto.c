@@ -37,7 +37,6 @@ static uint32_t frame_px;
 #define TILE_N    (TILE_COLS * TILE_ROWS)
 static uint32_t tile_sum[TILE_N];
 static uint32_t tile_xor[TILE_N];
-static uint8_t  tile_written[TILE_N];
 static int      tile_x;
 static int      tile_y;
 static int      tile_x0;
@@ -64,14 +63,13 @@ static uint32_t idle_ms;              /* 没收到任何字节的粗略毫秒数
 static uint32_t win_px;   /* 当前流的窗口像素数，用于整帧角标判定 */
 
 /* 待机动画节拍：主循环空闲时每圈末尾 delay_ms(1)，所以 1000 拍 ≈ 1 秒
- * （lcd.c 的 DELAY_MS_LOOPS 是实测标定的 1 ms 空循环数）。方块翻色、换图
+ * （DELAY_MS_LOOPS 就是 delay_ms() 的 1 ms 空循环数）。方块翻色、换图
  * 都只累加这个拍数，不调用 delay_ms 长等待，USB 与命令处理一刻都不停。 */
 #define STANDBY_BLINK_TICKS 1000u
 
 /* OTA 上传窗口半开会话的作废阈值（单位：主循环圈数，不是毫秒也不是字节）。
  * 空闲时一圈 ≈ 1 ms，所以 400 圈 ≈ 0.4 秒：正常 1 KB 窗口之间的间隔只有
- * 几毫秒，够用；主机崩了也能在几百毫秒内恢复，而不是原来 4 000 000 圈
- * （≈ 1 小时）。注意别照抄“200000 圈”，那在这个循环里等于 200 秒。 */
+ * 几毫秒，够用；主机中途崩溃也能在几百毫秒内恢复。 */
 #define UP_IDLE_LIMIT       400u
 
 /* 半帧/残包自愈：6 字节定界只要错位 1..5 字节就永远补不齐，表现为“设备还在
@@ -105,7 +103,7 @@ static void iwdg_feed(void);
  * 上位机一问（0A 0D）就知道"上次是死在哪一步"。
  *   1=main 开始  2=usb_init 完成  3=开机画面  4=主循环  5=收像素
  *   6=写资产    7=淡入淡出      8=整片擦除  9=待机动画
- *  10=OTA 搬运（update_apply；成功就复位，失败回老固件继续跑）
+ *  10=OTA 搬运（update_apply；成功就复位，失败则返回让当前固件继续运行）
  *
  * 复位原因从 RCC->RSTSCKR 读（地址和位定义见下面），last_stage 是"本次启动前
  * 最后记录到的阶段码"，也就是上次复位时停在哪一步。 */
@@ -178,9 +176,9 @@ static void trace_boot(uint8_t reset_flags)
 
 /* 待机动画里所有图形都是方形的：这颗屏分辨率低，圆画出来锯齿太明显，
  * 用户明确要求“用同大小的正方形”。 */
-#define BALL_SZ   10          /* 正方形球：原来 4 的 2.5 倍 */
-#define DOT_SZ     6          /* 拖尾点：原来 4 的 1.5 倍 */
-#define TRAIL_N   13          /* 拖尾点数：原来 9 的约 1.5 倍 */
+#define BALL_SZ   10          /* 球边长（像素） */
+#define DOT_SZ     6          /* 拖尾点边长（像素） */
+#define TRAIL_N   13          /* 拖尾点数 */
 #define SCR_W     160
 #define SCR_H      80
 
@@ -398,10 +396,9 @@ static uint8_t next_valid_slot(uint8_t from)
  * 注意：读 flash 时必须让屏 CS 保持高（PA6 一脚两用），所以每条带子
  * 都是"先读、再开窗、再推、再抬 CS"，跟 asset_draw 一样。
  *
- * v1.0.5 及以前这里是一次调用里的同步双重循环（8 档权重 × 40 条带子），
- * 实测 2652–3333 ms 期间主循环完全停摆：上位机正好在这时推帧的话，设备
- * 接收环被 NAK 塞死，主机 write 超时（写入失败: Write timeout），随后只能
- * 靠重连+握手恢复。现在拆成三件小事：
+ * 淡入必须在主循环里分步推进，不能一次调用里同步跑完：8 档权重 × 40 条带子
+ * 要两秒以上，全程阻塞会让主循环停摆，上位机这时推帧就会把接收环塞死、
+ * 主机 write 超时，只能靠重连+握手恢复。所以拆成三件小事：
  *   standby_fade()      只校验 + 打开两条 lane + 记下目标，立即返回；
  *   standby_fade_step() 主循环每圈调用一次，只解 1 条带子（640 B = 2 行）；
  *   fade_step/fade_band 记进度，40 条带子换一档权重，8 档走完收尾。
@@ -411,7 +408,7 @@ static uint8_t next_valid_slot(uint8_t from)
  *
  * 两条 lane 都走 assets.c 的 asset_fade_open/asset_fade_band：fmt=0（裸
  * RGB565）和 fmt=1（RLE）共用同一条带子路径——fmt=0 时 lane 里的 addr 正好
- * 是 asset_data_addr()，输出字节和以前的老路径一模一样；黑场（from = 0xFF）
+ * 是 asset_data_addr()，输出的就是裸 RGB565 数据；黑场（from = 0xFF）
  * 当一路虚拟帧（lane 里 fmt=2 填 0）。槽头格式只在 standby_fade() 里读一次。
  * 主循环那边：fade_active 还在就不再累计 standby_wait，轮播计时不会和淡入
  * 叠加；主机来帧/贴图把 standby_mode 清 0 时静默放弃剩下的带子。 */
@@ -614,7 +611,6 @@ static void tile_reset_region(int rx0, int ry0, int rx1, int ry1)
             t = (uint32_t)(ty * (int)TILE_COLS + tx);
             tile_sum[t] = 0u;
             tile_xor[t] = 0u;
-            tile_written[t] = 1u;
         }
     }
 }
@@ -635,7 +631,6 @@ static void tile_feed_byte(uint8_t b)
         if (t < TILE_N) {
             tile_sum[t] += (uint32_t)tile_hi * 3u + (uint32_t)b + 1u;
             tile_xor[t] ^= ((uint32_t)tile_hi << 8) | (uint32_t)b;
-            tile_written[t] = 1u;
         }
     }
     tile_x++;
@@ -666,7 +661,12 @@ static void stage_flush(void)
     }
 }
 
-/* 行程编码：每三个字节一组 [像素数, 高字节, 低字节]，展开后进 stage。 */
+/* 行程编码：每三个字节一组 [像素数, 高字节, 低字节]，展开后进 stage。
+ * 展开总量以本帧窗口像素数为上界：主机给的游程与窗口对不上时，超出的部分
+ * 不再展开，只置失败标记，本帧裁决字节回 0x15，stage 不会被无限灌满。 */
+static uint32_t rle_px;                   /* 本帧已展开的像素数 */
+static uint8_t  rle_over;                 /* 本帧展开超界 */
+
 static void rle_feed(uint8_t b)
 {
     rle_acc[rle_n++] = b;
@@ -677,18 +677,21 @@ static void rle_feed(uint8_t b)
         uint32_t cnt = rle_acc[0];
         uint8_t hi = rle_acc[1];
         uint8_t lo = rle_acc[2];
+        uint32_t limit = win_px ? win_px : 12800u;   /* 无窗口时按整屏算 */
 
         while (cnt-- > 0u) {
+            if (rle_px >= limit) {
+                rle_over = 1u;
+                return;
+            }
             if (stage_len + 2u > (uint32_t)sizeof(stage[0]))
                 stage_flush();
             stage[stage_idx][stage_len++] = hi;
             stage[stage_idx][stage_len++] = lo;
+            rle_px++;
         }
     }
 }
-static uint32_t t_frame_start;
-static volatile uint16_t last_frame_ms;
-volatile uint32_t g_loop_count;
 
 static uint32_t systick_now(void)
 {
@@ -700,13 +703,12 @@ static void systick_init(void)
     *(volatile uint32_t *)0xE000F010u = 0x00FFFFFFu;   /* CMP */
     *(volatile uint32_t *)0xE000F000u = 0x00000009u;   /* STRE | STE */
 }
-static volatile uint32_t frame_done;
 
 static int x0, y0, x1, y1;
 static int connected;
 
-/* 自研握手串：\0OPMSU（见上方 hello 定义）。版本号不编进握手，
- * 只从 class 0 sub 0x56 的版本帧取（老主机仍按 \0MSN 兼容路走）。 */
+/* 握手串：\0OPMSU（见上方 hello 定义）。版本号不编进握手，
+ * 只从 class 0 sub 0x56 的版本帧取。 */
 static uint32_t hb_hold;		/* >0：暂缓心跳，给应答包让路 */
 
 static void seg_fill4(const uint8_t *p)
@@ -784,13 +786,13 @@ static void handle_frame(const uint8_t *f)
     uint16_t b = (uint16_t)((f[4] << 8) | f[5]);
 
     if (cls == 0x00u) {
-        if (sub == 0x4Du) {
+        if (sub == 0x4Fu && f[2] == 0x4Bu && f[3] == 0x4Du &&
+            f[4] == 0x53u && f[5] == 0x55u) {   /* 主机回 \0OKMSU */
             connected = 1;
             usb_write(f, 6);
             return;
         }
-        if (sub == 0x56u) {                       /* 版本查询：不主动发送，只应答
-                                                   * v1.0.2 起 7 字节：
+        if (sub == 0x56u) {                       /* 版本查询：7 字节
                                                    * 56 MA MI PA TH TL AA */
             uint8_t st[7];
             uint16_t tv = adc_read(9u);
@@ -809,29 +811,33 @@ static void handle_frame(const uint8_t *f)
 
     if (cls == 0x02u) {
         switch (sub) {
-        case 0x00:
-            x0 = a;
-            y0 = b;
+        case 0x00:                            /* 起点：收到就钳进屏幕 */
+            x0 = (a < 160u) ? (int)a : 159;
+            y0 = (b < 80u) ? (int)b : 79;
             return;
-        case 0x01:
-            x1 = a;
-            y1 = b;
+        case 0x01:                            /* 终点（不含） */
+            x1 = (a < 160u) ? (int)a : 160;
+            y1 = (b < 80u) ? (int)b : 80;
             return;
         case 0x03:
             switch (f[2]) {
-            case 0x00:
+            case 0x00:                        /* 纯色填充 */
+            case 0x04:                        /* 与 0x00 同义的旧写法，一并接受 */
                 lcd_fill(x0, y0, x1 - x0, y1 - y0, (uint16_t)((f[3] << 8) | f[4]));
                 return;
-            case 0x04:                            /* 纯色填充，参数与上面相同 */
-                lcd_fill(x0, y0, x1 - x0, y1 - y0, (uint16_t)((f[3] << 8) | f[4]));
-                return;
-            case 0x07:
+            case 0x07: {                      /* 开始流式 */
+                uint8_t bad[6] = {0x02u, 0x03u, 0x15u, 0u, 0u, 0u};
+
+                if (x1 <= x0 || y1 <= y0) {   /* 空窗口/反向窗口：不开始，直接报错 */
+                    usb_write(bad, 6);
+                    return;
+                }
                 stream_bytes = 0u;
-                t_frame_start = systick_now();
                 standby_mode = 0u;
                 boot_shown = 0u;
-                win_px = (x1 > x0 && y1 > y0)
-                       ? (uint32_t)(x1 - x0) * (uint32_t)(y1 - y0) : 0u;
+                rle_px = 0u;
+                rle_over = 0u;
+                win_px = (uint32_t)(x1 - x0) * (uint32_t)(y1 - y0);
                 lcd_stream_begin(x0, y0, x1, y1);
                 tile_x0 = x0;
                 tile_y0 = y0;
@@ -841,9 +847,15 @@ static void handle_frame(const uint8_t *f)
                 tile_half = 0u;
                 tile_reset_region(x0, y0, x1, y1);
                 return;
-            case 0x08:
-                stream_write(seg, (uint32_t)((f[3] << 8) | f[4]));
+            }
+            case 0x08: {                      /* 推一段：长度封顶到段缓冲大小 */
+                uint32_t n = (uint32_t)((f[3] << 8) | f[4]);
+
+                if (n > sizeof seg)
+                    n = sizeof seg;
+                stream_write(seg, n);
                 return;
+            }
             case 0x0Du:                          /* 压缩段：f[5]=1 行程编码 */
                 stage_flush();
                 rle_mode = f[5];
@@ -863,21 +875,23 @@ static void handle_frame(const uint8_t *f)
                 uint32_t win_px_before = win_px;
                 if (stage_len > 0u) { stream_write(stage[stage_idx], stage_len); stage_len = 0u; stage_idx ^= 1u; }
                 lcd_raw_idle();
-                win_px = 0u;      /* 完整性色块已移除：像素对不对由裁决字节告诉上位机 */
+                win_px = 0u;
                 frame_px = 0u;
-                frame_done++;
-                last_frame_ms = (uint16_t)((systick_now() - t_frame_start) / 48000u);
-                /* 每帧一个裁决字节：0x06 = 像素数对得上，0x15 = 少收了。
-                 * 主机读它就能“发一帧等一次”，天然限速，永远不把接收环挤爆。 */
-                ver_val = (uint8_t)((win_px_before == 0u || frame_px_before == win_px_before)
-                                    ? 0x06u : 0x15u);
+                /* 每帧一个裁决字节：0x06 = 像素数对得上，0x15 = 少收/超收。
+                 * 主机读它就能“发一帧等一次”，天然限速，不会把接收环挤爆。 */
+                ver_val = (uint8_t)((rle_over != 0u || win_px_before == 0u ||
+                                     frame_px_before != win_px_before)
+                                    ? 0x15u : 0x06u);
+                rle_over = 0u;
+                rle_px = 0u;
                 ver_pending = 1u;
                 return;
             }
             default:
                 return;
             }
-        case 0x04:
+        case 0x04:                            /* 段缓冲填充：先等上一段 DMA 读完 */
+            lcd_stream_wait();
             seg_fill4(&f[2]);
             return;
         default:
@@ -885,8 +899,10 @@ static void handle_frame(const uint8_t *f)
         }
     }
 
-    if (cls == 0x04u) {
+    if (cls == 0x04u) {                       /* 段缓冲写入：先等上一段 DMA 读完 */
         uint32_t base = (uint32_t)f[1] * 4u;
+
+        lcd_stream_wait();
         if (base + 4u <= 256u) {
             seg[base]     = f[2];
             seg[base + 1] = f[3];
@@ -900,7 +916,10 @@ static void handle_frame(const uint8_t *f)
         uint8_t rr[6];
         uint32_t crc = ((uint32_t)f[2] << 24) | ((uint32_t)f[3] << 16) |
                        ((uint32_t)f[4] << 8) | (uint32_t)f[5];
-        uint8_t ok = (uint8_t)(update_stage_commit(crc) ? 0x06u : 0x15u);
+        uint8_t ok;
+
+        lcd_raw_idle();                       /* 后面要读 NOR，先把屏流收尾 */
+        ok = (uint8_t)(update_stage_commit(crc) ? 0x06u : 0x15u);
 
         if (ok == 0x06u) { up_committed = 1u; } else { up_committed = 0u; }
 
@@ -913,6 +932,7 @@ static void handle_frame(const uint8_t *f)
     if (cls == 0x14u) {                       /* 自更新：就地搬运并复位（摊运在 RAM） */
         uint8_t rr[6];
 
+        lcd_raw_idle();                       /* PA6 要当 NOR MISO 用，先关屏流 */
         /* 危险命令：会擦内部 flash。必须同时满足
            ① 帧里带确认令牌 A5 5A；
            ② 本次上电先成功提交过镜像（0A 13 回 06）；
@@ -951,7 +971,10 @@ static void handle_frame(const uint8_t *f)
     if (cls == 0x0Au) {                       /* 资产：开机/待机图 + 设置 */
         uint8_t r[14];
 
-        if (sub == 0x00u || sub == 0x07u) {    /* 查询（14 字节，v1.0.0 起 16 槽） */
+        /* 0A 里的命令可能读 NOR 或直接刷屏：先结束正在进行的屏流（PA6 复用） */
+        lcd_raw_idle();
+
+        if (sub == 0x00u || sub == 0x07u) {    /* 查询（14 字节，16 个待机槽） */
             uint16_t mask = 0u;
             uint8_t k;
 
@@ -982,114 +1005,6 @@ static void handle_frame(const uint8_t *f)
             usb_write(r, 6);
             return;
         }
-        /* ---- 自检扩展（v1.0.1 新增，编号 0x15..0x18 此前未占用）----
-         * 0x15/0x16 用变长回包（第 3 字节是后续长度），和 0x0C 一样解析。 */
-        if (sub == 0x15u) {                    /* 诊断①：NOR JEDEC ID + 应用起始 16 字节
-                                                * [0A,15,19,id0,id1,id2,app0..15,AA] = 23 字节 */
-            uint8_t b[24];
-            uint8_t id[3];
-            uint32_t i;
-
-            flash_read_id(id);
-            b[0] = 0x0Au; b[1] = 0x15u; b[2] = 19u;
-            b[3] = id[0]; b[4] = id[1]; b[5] = id[2];
-            for (i = 0u; i < 16u; i++)
-                b[6u + i] = *(volatile uint8_t *)(0x08000000u + i);
-            b[22] = 0xAAu;
-            usb_write(b, 23);
-            return;
-        }
-        if (sub == 0x1Bu) {                    /* 诊断⑤：主循环圈数/USB OUT 包数/NAK 次数
-                                                * [0A,1B,loop(4),out(2),nak(2)]；
-                                                * f[2]==1 清零 loop 计数器 */
-            uint8_t b[10];
-
-            if (f[2] == 1u)
-                g_loop_count = 0u;
-            b[0] = 0x0Au;
-            b[1] = 0x1Bu;
-            b[2] = (uint8_t)(g_loop_count >> 24);
-            b[3] = (uint8_t)((g_loop_count >> 16) & 0xFFu);
-            b[4] = (uint8_t)((g_loop_count >> 8) & 0xFFu);
-            b[5] = (uint8_t)(g_loop_count & 0xFFu);
-            b[6] = (uint8_t)((usb_out_count >> 8) & 0xFFu);
-            b[7] = (uint8_t)(usb_out_count & 0xFFu);
-            b[8] = (uint8_t)((usb_rx_stall >> 8) & 0xFFu);
-            b[9] = (uint8_t)(usb_rx_stall & 0xFFu);
-            usb_write(b, 10);
-            return;
-        }
-        if (sub == 0x1Au) {                    /* 诊断④：上一帧设备侧耗时 + DMA 超时
-                                                * [0A,1A,ms_hi,ms_lo,to_hi,to_lo]；
-                                                * f[2]==1 时先清零计数器 */
-            uint8_t b[6];
-
-            if (f[2] == 1u)
-                g_dma_to = 0u;
-            b[0] = 0x0Au;
-            b[1] = 0x1Au;
-            b[2] = (uint8_t)(last_frame_ms >> 8);
-            b[3] = (uint8_t)(last_frame_ms & 0xFFu);
-            b[4] = (uint8_t)(g_dma_to >> 8);
-            b[5] = (uint8_t)(g_dma_to & 0xFFu);
-            usb_write(b, 6);
-            return;
-        }
-        if (sub == 0x16u) {                    /* 诊断②：连跑 N 步待机动画并回报节拍
-                                                * [0A,16,06,steps,cad_hi,cad_lo]
-                                                *
-                                                * 这颗片的 SysTick 分频/方向不可靠（本工程约定
-                                                * 时间基准只用主循环迭代计数或 delay_ms()），
-                                                * 所以这里不报毫秒：字节 4-5 报当前待机动画的
-                                                * 节拍，单位是“主循环圈数/帧”。空闲时每圈末尾
-                                                * 都 delay_ms(1)，即 1 圈 ≈ 1 ms。
-                                                * N 步是同步真跑一遍（逐帧检查每次绘制不崩）；
-                                                * 毫秒耗时请上位机对回包做往返计时。 */
-            uint8_t steps = f[2];
-            uint8_t k;
-            uint32_t cad;
-
-            if (steps == 0u)
-                steps = 1u;
-            if (steps > 40u)
-                steps = 40u;
-
-            /* 与主循环待机状态机里的 need 完全同一套算法 */
-            if (g_settings.standby_mode == 2u)
-                cad = (uint32_t)g_settings.dwell * STANDBY_BLINK_TICKS;
-            else if (g_settings.standby_mode == 3u)
-                cad = 20u;                     /* 小球 20 圈/步 */
-            else
-                cad = STANDBY_BLINK_TICKS;     /* 四角闪烁 1000 圈/帧 */
-            if (cad > 0xFFFFu)
-                cad = 0xFFFFu;
-
-            /* 淡入改成主循环非阻塞推进后，这里同步把每一拍的淡入跑完，
-             * 否则回包只要几毫秒，也测不到整段过渡的真实时长。 */
-            for (k = 0u; k < steps; k++) {
-                standby_tick();
-                fade_run_sync();
-                iwdg_feed();
-            }
-            r[0] = 0x0Au; r[1] = 0x16u; r[2] = 0x06u;
-            r[3] = steps;
-            r[4] = (uint8_t)((cad >> 8) & 0xFFu);
-            r[5] = (uint8_t)(cad & 0xFFu);
-            usb_write(r, 6);
-            return;
-        }
-        if (sub == 0x17u) {                    /* 诊断③：内部 flash 0xF000 页擦写读回体检
-                                                * [0A,17,06/15,raw_code,0,0] */
-            uint8_t code = (uint8_t)update_probe();
-
-            r[0] = 0x0Au; r[1] = 0x17u;
-            r[2] = (uint8_t)(code == 0u ? 0x06u : 0x15u);
-            r[3] = code;
-            r[4] = 0u;
-            r[5] = 0u;
-            usb_write(r, 6);
-            return;
-        }
         if (sub == 0x18u) {                    /* 把槽 N 的图画到 (x, y)：
                                                 * 帧 [0A,18,kind,idx,x,y]，x/y 是有符号 int8，
                                                 * 允许负偏移/裁剪；回 [0A,18,06/15,0,0,0] */
@@ -1112,7 +1027,7 @@ static void handle_frame(const uint8_t *f)
             if (f[2] == 0x01u) {
                 uint32_t len = ((uint32_t)f[4] << 8) | (uint32_t)f[5];
 
-                stream_bytes = 0u;      /* the stream budget must not cut an upload short */
+                stream_bytes = 0u;      /* 上传不受像素流预算限制 */
                 up_idle = 0u;
                 up_rx_on = 0u;
                 ok = (uint8_t)(update_stage_begin(len) ? 0x06u : 0x15u);
@@ -1124,8 +1039,15 @@ static void handle_frame(const uint8_t *f)
             if (f[2] == 0x02u) {
                 uint32_t wl = ((uint32_t)f[4] << 8) | (uint32_t)f[5];
 
-                if (wl == 0u || wl > 2048u)
-                    wl = 2048u;
+                /* 没成功 begin、或窗口长度为 0/超限，全部丢弃并回错。绝不能拿
+                 * 静态的 stage 地址当前值继续写：那会把数据写进 NOR 的开机图。 */
+                if (!update_stage_ready() || wl == 0u || wl > 2048u) {
+                    r[0] = 0x0Au; r[1] = 0x12u; r[2] = 0x15u;
+                    r[3] = 0u; r[4] = 0u; r[5] = 0u;
+                    usb_write(r, 6);
+                    return;
+                }
+                stream_bytes = 0u;      /* 每窗重新计预算，>40 KB 的镜像也不会被截断 */
                 up_rx_on = 1u;
                 up_idle = 0u;
                 up_rx_left = (uint16_t)wl;
@@ -1156,7 +1078,7 @@ static void handle_frame(const uint8_t *f)
 
             lcd_raw_idle();
             standby_mode = 0u;
-            /* kind 最高位携带数据格式：0 = 裸 RGB565（老主机，默认），
+            /* kind 最高位携带数据格式：0 = 裸 RGB565（默认），
              * 1 = RLE。低 7 位还是槽类型，所以旧上位机发 0/1 完全不受影响。 */
             asset_begin((uint8_t)(kf & 0x7Fu), f[3], len,
                         (uint8_t)((kf >> 7) & 1u));
@@ -1165,8 +1087,7 @@ static void handle_frame(const uint8_t *f)
             asset_win = 0u;
             asset_last_tick = systick_now();
             r[0] = 0x0Au; r[1] = 0x01u;
-            /* 注意：这里必须问 asset_writing()，不能再问 asset_rx——
-             * 分窗模式下 asset_rx 恒为 0，之前照抄它导致 begin 永远回 0x15。 */
+            /* 分窗模式下 asset_rx 恒为 0，判断“正在写”只能问 asset_writing()。 */
             r[2] = (uint8_t)(asset_writing() ? 0x06u : 0x15u);
             r[3] = 0u; r[4] = 0u; r[5] = 0u;
             usb_write(r, 6);
@@ -1175,8 +1096,13 @@ static void handle_frame(const uint8_t *f)
         if (sub == 0x08u) {                    /* 送来一段数据：len_hi len_lo，收满回 ack */
             uint32_t wl = ((uint32_t)f[4] << 8) | (uint32_t)f[5];
 
-            if (wl == 0u || wl > 4096u)
-                wl = 4096u;
+            /* 长度为 0 或超限：不猜、不钳位，直接回错让主机重发 */
+            if (wl == 0u || wl > 4096u) {
+                r[0] = 0x0Au; r[1] = 0x08u; r[2] = 0x15u;
+                r[3] = 0u; r[4] = 0u; r[5] = 0u;
+                usb_write(r, 6);
+                return;
+            }
             if (!asset_writing()) {
                 r[0] = 0x0Au; r[1] = 0x08u; r[2] = 0x15u;
                 r[3] = 0u; r[4] = 0u; r[5] = 0u;
@@ -1308,16 +1234,30 @@ static void handle_frame(const uint8_t *f)
             return;
         }
         if (sub == 0x0Au) {                    /* 抹掉整片 1 MB NOR：恢复出厂 */
+            uint8_t ok;
+
+            lcd_raw_idle();                    /* 擦除期间 PA6 要留给 NOR */
+            /* 与 0A 14 同一套保护：令牌 + 空闲态，避免流错位时凑出一次整片擦除 */
+            if (f[2] != 0xA5u || f[3] != 0x5Au ||
+                raw_left > 0u || up_rx_on != 0u || asset_rx != 0u || sig_rx != 0u) {
+                r[0] = 0x0Au; r[1] = 0x0Au; r[2] = 0x15u;
+                r[3] = 0xFEu; r[4] = 0u; r[5] = 0u;
+                usb_write(r, 6);
+                return;
+            }
             TRACE_STAGE(8u);
-            flash_erase_chip_now();            /* 0xC7 并等就绪，内部边等边喂狗 */
-            asset_invalidate();                /* 缓存作废，否则仍以为槽里有图 */
-            settings_default(&g_settings);     /* 只改内存；NOR 留空，下次上电自动用默认 */
-            r[0] = 0x0Au; r[1] = 0x0Au; r[2] = 0x06u;
+            ok = (uint8_t)(flash_erase_chip_now() ? 0x06u : 0x15u);
+            if (ok == 0x06u) {
+                asset_invalidate();            /* 缓存作废，否则仍以为槽里有图 */
+                settings_default(&g_settings); /* 只改内存；NOR 留空，下次上电用默认 */
+            }
+            r[0] = 0x0Au; r[1] = 0x0Au; r[2] = ok;
             r[3] = 0u; r[4] = 0u; r[5] = 0u;
             usb_write(r, 6);
             return;
         }
         if (sub == 0x06u) {                    /* 存设置：boot standby count dwell */
+            lcd_raw_idle();                    /* 下面可能要画自检屏/待机图 */
             g_settings.boot_mode = f[2];
             g_settings.standby_mode = f[3];
             g_settings.standby_count = f[4];
@@ -1352,7 +1292,7 @@ static void handle_frame(const uint8_t *f)
                 boot_screen_row(4u, (uint8_t)((rep & 0x10u) ? 1u : 2u));
                 boot_screen_done(passed, 5u);
                 blink_first = 1u;
-            } else if (standby_mode) {
+            } else if (g_settings.standby_mode) {
                 blink_first = 1u;
                 standby_draw();
             }
@@ -1404,6 +1344,7 @@ int main(void)
 
     trace_boot(rst);
     TRACE_STAGE(1u);
+    g_up_result = 0u;           /* .noinit 跨复位保留，上电先把它归零 */
 
     RCC->APB2PCENR |= RCC_APB2_GPIOA | RCC_APB2_GPIOB | RCC_APB2_GPIOC | RCC_APB2_AFIO;
     board_clock_init();
@@ -1494,7 +1435,6 @@ int main(void)
     iwdg_start();
 
     for (;;) {
-        g_loop_count++;
         iwdg_feed();
         TRACE_STAGE(4u);
         int n;
@@ -1502,9 +1442,9 @@ int main(void)
         static uint32_t hello_tick;
         static uint32_t stall;
 
-        /* 主机重新打开串口会触发 USB 复位：把上个会话的残包清掉。老固件从不清
-         * rx_ring，关端口时发了一半的命令会一直留在设备里，之后 6 字节定界
-         * 永久错位（实测只能拔插）。复位后主机必定重新握手，丢掉是安全的。 */
+        /* 主机重新打开串口会触发 USB 复位：把上一个会话的残包清掉。
+         * 关端口时可能有一半命令还留在设备里，不清掉的话 6 字节定界就永久
+         * 错位，后续命令全部对不上。复位后主机必定重新握手，丢掉是安全的。 */
         if (usb_reset_count != rx_reset_seen) {
             rx_reset_seen = (uint8_t)usb_reset_count;
             rx_len = 0;
@@ -1527,8 +1467,7 @@ int main(void)
          * 之后的帧头全部错位，表现为画面冻结且切插件也无法恢复。 */
         if (raw_left > 0u && rx_len == 0) {
             /* 400000 圈：主机按 2 KB 分块限速发送，块间可能有十几毫秒空档，
-             * 旧值 4000 圈（几毫秒）在 Linux 的成串 USB 传输下会误判成断流，
-             * 一帧中途作废就缺块（实测 Linux 整帧报 30/50 块坏）。
+             * 阈值太小会把正常间隔误判成断流，一帧中途作废就缺块。
              * 真断流时多等几百毫秒也无妨。 */
             if (++stall > 400000u) {
                 raw_left = 0u;
@@ -1578,14 +1517,10 @@ int main(void)
                 iwdg_feed(), delay_ms(1);
         }
 
-        /* 待机动画：四角 8x8 方块白/黄交替、图片轮播、弹球都在这里推进。
-         *
-         * 以前这里是 for (i = 0; i < 600; i++) { ... delay_ms(1); }，等于把
-         * 主循环钉死最多 1 秒（图片模式能达到整段停留时间）：这一秒里 USB
-         * 收字节只能在循环里蹭一下，命令要等一整秒才处理。现在改成状态机——
-         * 主循环每转一圈给 standby_wait 加一拍，攒够 STANDBY_BLINK_TICKS
-         * （≈1 秒）才翻色/换图，全程不阻塞；这一圈收到字节就跳过，和原来
-         * “rx_len == 0 才 tick”的行为一致。 */
+        /* 待机动画：四角方块白/黄交替、图片轮播、弹球都在这里推进。
+         * 用非阻塞状态机：主循环每转一圈给 standby_wait 加一拍，攒够
+         * STANDBY_BLINK_TICKS（≈1 秒）才翻色/换图，这一圈收到字节就跳过，
+         * 不会因为动画把 USB 收包和命令处理挡住。 */
         /* 非阻塞交叉淡入：这一圈只推一条 2 行带子（640 B）就回主循环，
          * 所以淡入期间 USB 每 3–10 ms 就被服务一次，不会再出现写超时。 */
         if (fade_active) {
@@ -1607,7 +1542,7 @@ int main(void)
                 uint32_t need = STANDBY_BLINK_TICKS;
 
                 /* 图片轮播按设置的“每张停留秒数”，方块轮播固定 1 秒，
-                 * 弹球 20 拍一步（空闲时 ≈20 ms，和原来一致） */
+                 * 弹球 20 拍一步（空闲时 ≈20 ms） */
                 if (g_settings.standby_mode == 2u)
                     need = (uint32_t)g_settings.dwell * STANDBY_BLINK_TICKS;
                 else if (g_settings.standby_mode == 3u)
@@ -1626,8 +1561,8 @@ int main(void)
         }
 
         /* 资产写到一半没下文（主机崩了/线松了）：数空转圈数后作废，别把设备卡成哑巴。
-         * 这里不能用 SysTick：这颗片的 SysTick 计数方向/分频都不直观，之前用它
-         * 算时间出过“纯白方块”和“看门狗立刻触发”的巧合事故。 */
+         * 这里用主循环圈数而不是 SysTick 计时：空闲时一圈 ≈ 1 ms，计数单调，
+         * 不受 SysTick 的分频/计数配置影响。 */
         if (asset_rx) {
             TRACE_STAGE(6u);
             if (rx_len == 0) {
@@ -1646,8 +1581,8 @@ int main(void)
         }
 
         /* OTA 上传窗口半开（0A 12 02 声明了 1 KB，字节却没来齐）：主循环空闲
-         * 时一圈 ≈ 1 ms，UP_IDLE_LIMIT = 400 圈 ≈ 0.4 秒就作废，比原来的
-         * 4 000 000 圈（≈1 小时）快三个数量级。作废时清状态并回一个
+         * 时一圈 ≈ 1 ms，UP_IDLE_LIMIT = 400 圈 ≈ 0.4 秒就作废，设备不会长时间
+         * 停在“等数据”状态。作废时清状态并回一个
          * [0A,12,15,00,00,00]，主机能看到“这窗废了”，设备也不会把随后到的
          * 命令当成图像数据吃掉。 */
         if (up_rx_on) {
@@ -1846,7 +1781,6 @@ int main(void)
 
         /* 串口安静一段时间就周期性打招呼：主机的握手只在这时能被满足，
          * 一旦有数据进来立刻停，避免握手包混进图像流。 */
-        usb_pump();
         if (ver_pending && usb_write(&ver_val, 1u))
             ver_pending = 0u;
 

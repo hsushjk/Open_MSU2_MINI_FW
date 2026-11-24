@@ -1,12 +1,12 @@
-/* USB 设备栈：按原厂 vec_B8（0x1110）的控制流逐段重写。
+/* USB 设备栈：双接口 CDC-ACM（EP0 控制、EP1 IN 通知、EP2 OUT 数据、EP3 IN 数据）。
  *
- * 与原厂的对应关系：
+ * 控制流：
  *   SETUP  → 拷贝 8 字节 → 按 bmRequestType / bRequest 分派 → 统一收尾装包
- *   IN     → 请求 0x05 写 DEV_ADDR；请求 0x06 续发 64 字节
- *   OUT    → EP0 状态阶段 ACK；EP2 取数据
+ *   IN     → SET_ADDRESS 写 DEV_ADDR；GET_DESCRIPTOR 续发下一包
+ *   OUT    → EP0 状态阶段 ACK；EP2 收数据进接收环
  *   复位   → DEV_ADDR=0、重配端点、清状态
  *
- * 装包规则（原厂 0x1666..0x1678 那段）：
+ * 装包规则：
  *   设备到主机：长度 = min(wLength, 64)，UEP0_CTRL_H = 0x40（绝对写）
  *   无数据请求：长度 = 0，不动 UEP0_CTRL_H
  *   续包：长度 64，UEP0_CTRL_H ^= 0x40
@@ -60,6 +60,9 @@ typedef struct {
 static uint8_t  ep0_buf[64] __attribute__((aligned(4)));
 static uint8_t  ep2_buf[64] __attribute__((aligned(4)));
 static uint8_t  ep3_buf[64] __attribute__((aligned(4)));
+static uint8_t  ep3_pending[64] __attribute__((aligned(4)));
+static uint16_t ep3_pending_len;
+static void ep3_start(const uint8_t *src, int len);
 static uint8_t  ep1_buf[8]  __attribute__((aligned(4)));
 
 #define RX_RING_SIZE 8192u
@@ -79,34 +82,18 @@ static uint8_t  pending_addr = 0xFFu;
 static uint8_t  setup_ok;
 static const uint8_t *ep0_ptr;
 static uint16_t ep0_left;
-static uint8_t  need_greeting;
-static uint8_t  greeting_sent;
 
 volatile uint32_t usb_irq_count;
 volatile uint32_t usb_reset_count;
 volatile uint32_t usb_setup_count;
 volatile uint32_t usb_in_count;
 volatile uint32_t usb_out_count;
-volatile uint16_t usb_last_len;
-volatile uint8_t usb_last_b0;
-volatile uint8_t usb_last_b1;
 volatile uint32_t usb_suspend_count;
-volatile uint32_t usb_ep2_drop;
 volatile uint32_t usb_rx_stall;
 volatile uint32_t usb_other_count;
 
-uint8_t  usb_req_log[16];
-uint8_t  usb_req_type[16];
-volatile uint32_t usb_req_count;
-
-uint16_t usb_tx_len;
-uint8_t  usb_tx_snap[8];
-uint8_t  usb_setup_snap[4];
 volatile uint8_t ep3_busy;
-volatile uint32_t usb_packet_count;
 int usb_irq_enable = 1;
-volatile uint8_t usb_last_fg;
-volatile uint8_t usb_last_st;
 
 void usb_gpio_init(void);
 
@@ -123,14 +110,11 @@ static void ep0_first(const uint8_t *data, uint16_t len)
     uint16_t i;
     for (i = 0; i < len && i < 64u; i++)
         ep0_buf[i] = data[i];
-    usb_tx_len = len;
-    for (i = 0; i < 8u; i++)
-        usb_tx_snap[i] = (i < len) ? ep0_buf[i] : 0u;
     ep0_length(len);
     UEP0_H = 0x40u;
 }
 
-/* 续包：按剩余长度发送，原厂异或翻转 */
+/* 续包：按剩余长度发送，数据翻转位取反 */
 static void ep0_next(void)
 {
     uint16_t n = ep0_left;
@@ -246,15 +230,6 @@ static void handle_setup(void)
     wIndex = (uint16_t)(sb[4] | (sb[5] << 8));
     wLength = (uint16_t)(sb[6] | (sb[7] << 8));
 
-    usb_setup_snap[0] = sb[0];
-    usb_setup_snap[1] = sb[1];
-    usb_setup_snap[2] = sb[4];
-    usb_setup_snap[3] = sb[6];
-    if (usb_req_count < 16u) {
-        usb_req_type[usb_req_count] = (uint8_t)(wValue >> 8);
-        usb_req_log[usb_req_count++] = sb[1];
-    }
-
     setup_ok = 1;
 
     if ((bmRequestType & 0x60u) != 0u) {
@@ -265,10 +240,6 @@ static void handle_setup(void)
             setup_ok = 0;
             return;
         case 0x22:                       /* SET_CONTROL_LINE_STATE */
-            /* 上位机每开一次端口都会走到这里：重新武装问候包，
-               这样就不必拔插 USB 才能重新认到设备 */
-            need_greeting = 1;
-            greeting_sent = 0;
             ep0_zlp();
             return;
         case 0x21:                       /* GET_LINE_CODING */
@@ -346,7 +317,7 @@ static void ep0_in_complete(void)
         return;
     }
 
-    /* 没有后续数据：只清长度，控制字保持原厂写法不动 */
+    /* 没有后续数据：只清长度，控制字保持原样不动 */
     UEP0_LEN = 0;
 }
 
@@ -360,9 +331,6 @@ void usb_service(void)
     int_st = USB->INT_ST;
     len = USB->RX_LEN;
     int_fg = USB->INT_FG;
-
-    usb_last_fg = int_fg;
-    usb_last_st = int_st;
 
     if ((int_fg & INT_FG_TRANSFER) == 0u) {
         if ((int_fg & INT_FG_RESET) != 0u) {
@@ -399,6 +367,13 @@ void usb_service(void)
         usb_in_count++;
         if ((int_st & 0x07u) == 3u) {
             ep3_busy = 0u;              /* EP3 这一笔已被主机取走 */
+            if (ep3_pending_len != 0u) {
+                uint16_t n = ep3_pending_len;
+
+                ep3_pending_len = 0u;
+                ep3_busy = 1u;
+                ep3_start(ep3_pending, (int)n);
+            }
         } else if ((int_st & 0x07u) == 0u) {
             ep0_in_complete();
         }
@@ -407,9 +382,6 @@ void usb_service(void)
     }
 
     usb_out_count++;
-    usb_last_len = len;
-    usb_last_b0 = ((volatile const uint8_t *)ep2_buf)[0];
-    usb_last_b1 = ((volatile const uint8_t *)ep2_buf)[1];
     if ((int_st & 0x3fu) == 0x02u) {
         uint16_t k;
         uint16_t used = (uint16_t)((rx_head - rx_tail) & (RX_RING_SIZE - 1u));
@@ -425,12 +397,8 @@ void usb_service(void)
                 rx_ring[rx_head] = ((volatile const uint8_t *)ep2_buf)[k];
                 rx_head = (uint16_t)((rx_head + 1u) & (RX_RING_SIZE - 1u));
             }
-            /* 只要这一包（<=64 B）放得下就 ACK，不再"余量不足 2 KB 就提前 NAK"：
-             * 提前 NAK 会让主机的 OUT URB 部分完成（usbmon 实测 1280 B 只完成
-             * 768 B），Linux 的 cdc_acm 为此要退避几百毫秒。不过余量节流并不是
-             * 整帧慢的主因（真凶在主机写路径，见 msu2_core/transport.py 的非阻塞
-             * 写）。所以这里只简化策略：这一包真放不下（free < 64，上面已处理）
-             * 才 NAK，字节留在主机侧，不丢数据。 */
+            /* 这一包（<=64 B）放得下就 ACK。只有在 free < 64（上面已处理）
+             * 时才 NAK，字节留在主机侧，不丢数据。 */
             UEP2_H = (uint8_t)(UEP2_H & 0xfcu);            /* ACK */
         }
     } else {
@@ -465,14 +433,13 @@ int usb_read(uint8_t *dst, int max)
     return n;
 }
 
-int usb_write(const uint8_t *src, int len)
+/* 装一笔 EP3 IN 传输：拷进 DMA 缓冲、设长度、给 ACK + DATA 翻转位。
+ * 只能在一笔已经完成（ep3_busy == 0）或刚清掉 busy 时调用。 */
+static void ep3_start(const uint8_t *src, int len)
 {
     static uint8_t tog;
     int i;
-    if (len > 64)
-        len = 64;
-    if (!len)
-        return 0;
+
     for (i = 0; i < len; i++)
         ep3_buf[i] = src[i];
     *(volatile uint32_t *)0x4002341Cu = (uint32_t)(unsigned long)ep3_buf;
@@ -480,23 +447,27 @@ int usb_write(const uint8_t *src, int len)
     /* ACK 位、bit6 数据翻转，每一笔交替，不能写死 */
     *(volatile uint8_t  *)0x4002342Eu = tog ? 0x40u : 0x00u;
     tog = (uint8_t)(tog ^ 1u);
-    return len;
 }
 
-void usb_pump(void)
+/* 发一笔到 EP3 IN。忙的时候不覆盖正在发送的那一块，而是暂存到待发槽，
+ * 由 IN 完成中断补发（只保留最新一笔：上层应答不会排队等待）。 */
+int usb_write(const uint8_t *src, int len)
 {
-}
+    int i;
 
-int usb_take_greeting(uint8_t *dst)
-{
-    if (!need_greeting || greeting_sent)
+    if (len <= 0)
         return 0;
-    greeting_sent = 1;
-    dst[0] = 0x00;
-    dst[1] = 'M';
-    dst[2] = 'S';
-    dst[3] = 'N';
-    dst[4] = '0';
-    dst[5] = '2';
-    return 6;
+    if (len > 64)
+        len = 64;
+
+    if (ep3_busy) {
+        for (i = 0; i < len; i++)
+            ep3_pending[i] = src[i];
+        ep3_pending_len = (uint16_t)len;
+        return len;
+    }
+
+    ep3_busy = 1u;
+    ep3_start(src, len);
+    return len;
 }

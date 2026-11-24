@@ -25,7 +25,6 @@
 #define APPIMG_MAGIC2 'U'
 #define APPIMG_MAGIC3 '2'
 #define APPIMG_FLAG_VALID 0x01u
-#define APPIMG_FLAG_APPLY 0x02u
 
 /* 内部 flash 控制器（regs.h 里的 FLASH_TypeDef 正好对上）
  *   CTLR bit0 PG 编程, bit1 PER 页擦除, bit2 MER 全片擦除, bit6 STRT 启动
@@ -88,9 +87,10 @@ static void __attribute__((section(".ramfunc"), noinline)) ram_iwdg(void)
     *(volatile uint32_t *)0x40003000u = 0xAAAAu;
 }
 
-/* ---- NOR 写：只用于“先把镜像存进去”这一侧 ---- */
-static uint32_t stage_addr;
-static uint32_t stage_len;
+/* ---- NOR 写：只用于"先把镜像存进去"这一侧 ---- */
+static uint32_t stage_addr;   /* 0 表示本次上电还没有成功 begin 过 */
+static uint32_t stage_len;    /* 头里声明的镜像长度 */
+static uint32_t stage_left;   /* 还能接收多少字节 */
 
 static void put32le(uint8_t *p, uint32_t v)
 {
@@ -104,10 +104,16 @@ int update_stage_begin(uint32_t len)
 {
     uint32_t pages;
 
+    /* 新一轮 begin 作废上一轮没传完的会话：失败时 ready 不会残留为真，
+     * 也就不会让后续窗口数据写进一个旧地址。 */
+    stage_addr = 0u;
+    stage_len = 0u;
+    stage_left = 0u;
     if (len == 0u || len > 48000u)
         return 0;
     stage_addr = APPIMG_ADDR + APPIMG_HDR;
     stage_len = len;
+    stage_left = len;
     pages = (APPIMG_HDR + len + 4095u) / 4096u;
     for (uint32_t i = 0; i < pages; i++) {
         flash_erase_4k(APPIMG_ADDR + i * 4096u);
@@ -116,10 +122,23 @@ int update_stage_begin(uint32_t len)
     return 1;
 }
 
+/* 没有成功 begin 过就丢弃；写了超过声明长度的字节也丢弃。
+ * 这两道检查防止 0A 12 02 在窗口命令之前/之后把数据写到 NOR 的 0x000000
+ * 开机图或镜像头上去。 */
 void update_stage_feed(const uint8_t *src, int n)
 {
-    flash_program(stage_addr, src, n);
+    if (stage_addr == 0u || stage_len == 0u)
+        return;
+    if (n <= 0 || (uint32_t)n > stage_left)
+        return;
+    (void)flash_program(stage_addr, src, n);
     stage_addr += (uint32_t)n;
+    stage_left -= (uint32_t)n;
+}
+
+int update_stage_ready(void)
+{
+    return (stage_addr != 0u && stage_left != 0u);
 }
 
 int update_stage_commit(uint32_t crc)
@@ -129,6 +148,11 @@ int update_stage_commit(uint32_t crc)
     uint8_t buf[64];
     uint32_t off;
     uint32_t calc = 0xFFFFFFFFu;
+
+    /* 没收到声明长度的数据（窗口中途断掉）就没有提交资格：此时 NOR 里的镜像
+     * 后半段还是擦除态，CRC 一定对不上，直接判失败让上层回 0x15。 */
+    if (stage_addr == 0u || stage_left != 0u)
+        return 0;
 
     /* 写完再读回来算一遍 CRC：写坏就当场拒绝，别等重启时才发现 */
     for (off = 0; off < stage_len; ) {
@@ -153,7 +177,8 @@ int update_stage_commit(uint32_t crc)
     hdr[5] = 0u;
     put32le(hdr + 6, stage_len);
     put32le(hdr + 10, crc);
-    flash_program(APPIMG_ADDR, hdr, APPIMG_HDR);
+    if (!flash_program(APPIMG_ADDR, hdr, APPIMG_HDR))
+        return 0;
     flash_read(APPIMG_ADDR, back, APPIMG_HDR);
     if (back[0] != APPIMG_MAGIC0 || back[4] != APPIMG_FLAG_VALID)
         return 0;
@@ -178,10 +203,10 @@ void update_clear_apply_flag(void)
 
 /* ---------------- 真正擦写内部 flash 的那一段：跑在 RAM 里 ----------------
  *
- * 这一段的寄存器序列照抄 WCH 官方 SDK（ch32x035_flash.c 的 FLASH_ROM_WRITE /
- * FLASH_ROM_ERASE），之前失败的原因有三处：
- *   1) 这颗片的页编程走“页缓冲”：PAGE_PG + BUF_RST 清缓冲，然后 64 个字**写到目标
- *      地址**、每写一个置 BUF_LOAD 等忙，最后写 ADDR + STRT 才真正烧进 flash；
+ * 寄存器序列按 WCH 官方 SDK（ch32x035_flash.c 的 FLASH_ROM_WRITE /
+ * FLASH_ROM_ERASE）的要求，三点必须同时满足：
+ *   1) 这颗片的页编程走"页缓冲"：PAGE_PG + BUF_RST 清缓冲，然后 64 个字写到目标
+ *      地址、每写一个置 BUF_LOAD 等忙，最后写 ADDR + STRT 才真正烧进 flash；
  *      直接半字写进 flash 是无效的（不报错，但什么也没写进去）。
  *   2) 编程前必须用同样的两个钥匙解 FLASH->MODEKEYR（快速模式），否则页缓冲不工作。
  *   3) 编程地址用 0x0800_0000 别名窗口，而固件代码跑在 0x0000_0000 别名上。
@@ -201,7 +226,6 @@ void update_clear_apply_flag(void)
 #define CR_PAGE_ER      (1u << 17)         /* 256 字节页擦除 */
 
 #define IFLASH_ALIAS    0x08000000u        /* 内部 flash 的编程别名窗口 */
-#define IFLASH_SPAN     0xF800u            /* 62 KB */
 
 /* 上次搬运的结果：0=成功，1=头不对，2=长度不对，3=体检失败，4=写回校验失败，
  * 5=整段 CRC 与头里对不上（此时内部 flash 一个字节都没动） */
@@ -319,6 +343,52 @@ ram_nor_crc(uint32_t nor_addr, uint32_t len)
     return crc ^ 0xFFFFFFFFu;
 }
 
+/* 搬运并校验一个 1 KB 页（内部 flash 的擦除粒度）：擦 -> 写 256 字节页 -> 读回比对。
+ * 读回不一致就整页重擦重写，最多 3 次；每次重试前后都喂狗。
+ * 返回 1 成功，0 三次都失败。跑在 RAM 里，调用方已关中断。 */
+static int __attribute__((section(".ramfunc"), noinline)) ram_copy_page(uint32_t off, uint32_t n)
+{
+    uint8_t buf[256];
+    uint32_t attempt;
+
+    for (attempt = 0u; attempt < 3u; attempt++) {
+        uint32_t p;
+        uint32_t i;
+        int ok = 1;
+
+        ram_erase_page(IFLASH_ALIAS + off);
+        ram_iwdg();
+        for (p = 0u; p < n; p += 256u) {
+            ram_nor_read(APPIMG_ADDR + APPIMG_HDR + off + p, buf, 256u);
+            ram_program_page(IFLASH_ALIAS + off + p, buf);
+            ram_iwdg();
+        }
+        for (p = 0u; p < n && ok; p += 256u) {
+            ram_nor_read(APPIMG_ADDR + APPIMG_HDR + off + p, buf, 256u);
+            for (i = 0u; i < 256u; i++) {
+                if (*(volatile uint8_t *)(IFLASH_ALIAS + off + p + i) != buf[i]) {
+                    ok = 0;
+                    break;
+                }
+            }
+        }
+        if (ok)
+            return 1;
+        ram_iwdg();
+    }
+    return 0;
+}
+
+/* 失败收尾：锁回 flash、PA6 恢复推挽输出、结果写进 .noinit、中断重新打开。
+ * 任何要 return 的失败路径都先走这里，绝不能带着关中断或 PA6 输入态返回。 */
+static void __attribute__((section(".ramfunc"), noinline)) up_apply_abort(uint8_t result)
+{
+    ram_lock();
+    ram_dc_output();
+    g_up_result = result;
+    __asm__ volatile("csrsi mstatus, 8");
+}
+
 int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
 {
     uint8_t hdr[APPIMG_HDR];
@@ -371,24 +441,19 @@ int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
     ram_erase_page(IFLASH_ALIAS + IFLASH_PROBE_ADDR);
     ram_dc_output();
 
-    /* 4. 擦掉应用区（等于擦掉向量表，所以从现在起关中断、只跑 RAM 里的代码） */
+    /* 4. 逐页搬运：每页先擦再写再读回，页与页之间互相独立。
+     *    一开始就擦掉整片的话，任何一次失败都会留下“全空 + 回不去”的状态；
+     *    按页擦写至少让前面的页已经是新镜像。从这里开始关中断、只跑 RAM 里的代码。 */
     __asm__ volatile("csrci mstatus, 8");
 
     for (off = 0u; off < len; off += 1024u) {
-        ram_erase_page(IFLASH_ALIAS + off);
-        ram_iwdg();
-    }
+        uint32_t n = len - off;
 
-    /* 5. 按 256 字节一页从 NOR 搬进内部 flash，并读回校验 */
-    for (off = 0u; off < len; off += 256u) {
-        ram_nor_read(APPIMG_ADDR + APPIMG_HDR + off, buf, 256u);
-        ram_program_page(IFLASH_ALIAS + off, buf);
-        ram_iwdg();
-        for (i = 0u; i < 256u; i++) {
-            if (*(volatile uint8_t *)(IFLASH_ALIAS + off + i) != buf[i]) {
-                g_up_result = 4u;
-                return 4;
-            }
+        if (n > 1024u)
+            n = 1024u;
+        if (!ram_copy_page(off, n)) {
+            up_apply_abort(4u);
+            return 4;
         }
     }
     ram_lock();
@@ -396,41 +461,5 @@ int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
     /* 6. 复位，让新固件跑起来 */
     g_up_result = 0u;
     ram_reset();
-    return 0;
-}
-
-/* 体检：擦一页 IFLASH_PROBE_ADDR（0xF000，应用区之外）、写 8 字节、读回比对。
- * 只用于验证写序列，不碰应用区。 */
-int update_probe(void)
-{
-    uint8_t want[8];
-    uint32_t i;
-
-    for (i = 0u; i < 8u; i++)
-        want[i] = (uint8_t)(0xA0u + i);
-
-    ram_unlock();
-    ram_erase_page(IFLASH_ALIAS + IFLASH_PROBE_ADDR);
-    for (i = 0u; i < 8u; i++) {
-        if (*(volatile uint8_t *)(IFLASH_ALIAS + IFLASH_PROBE_ADDR + i) != 0xFFu) {
-            ram_lock();
-            return 1;
-        }
-    }
-    {
-        uint8_t buf[256];
-        for (i = 0u; i < 256u; i++)
-            buf[i] = 0xFFu;
-        for (i = 0u; i < 8u; i++)
-            buf[i] = want[i];
-        ram_program_page(IFLASH_ALIAS + IFLASH_PROBE_ADDR, buf);
-    }
-    for (i = 0u; i < 8u; i++) {
-        if (*(volatile uint8_t *)(IFLASH_ALIAS + IFLASH_PROBE_ADDR + i) != want[i]) {
-            ram_lock();
-            return 2;
-        }
-    }
-    ram_lock();
     return 0;
 }
