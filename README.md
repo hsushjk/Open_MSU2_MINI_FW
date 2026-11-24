@@ -1,6 +1,6 @@
 # Open_MSU2_MINI_FW
 
-MSU2_MINI 小屏（CH32X033F8P6 + P25D80H + ST7735S 160×80）的自研固件 **v1.0.2**：不基于原厂固件、不链接 WCH 库，`-nostdlib` 从 `_start` 起手写，实现 USB CDC 流式刷屏、NOR 图像资产、触摸采样、开机/待机动画、免拆自更新和一套自诊断命令。
+MSU2_MINI 小屏（CH32X033F8P6 + P25D80H + ST7735S 160×80）的自研固件 **v1.0.3**：不基于原厂固件、不链接 WCH 库，`-nostdlib` 从 `_start` 起手写，实现 USB CDC 流式刷屏、NOR 图像资产、触摸采样、开机/待机动画、免拆自更新和一套自诊断命令。
 
 ## 关键特性
 
@@ -9,24 +9,32 @@ MSU2_MINI 小屏（CH32X033F8P6 + P25D80H + ST7735S 160×80）的自研固件 **
 - **板载 1 MB NOR 资产**：开机图 1 槽 + 待机图 16 槽 + 应用镜像暂存 + 设置区，写进 NOR 就断电生效，不依赖上位机。
 - **免拆 OTA**：NOR 暂存 → CRC 提交 → RAM 里先整段重算 CRC、再体检内部 flash 的 `0xF000` 页 → 擦写搬运并读回校验 → 复位。任一步不过都不动内部 flash；CRC 预检不过连擦除都不会发生。
 - **三道保险**：接收环满只 NAK 不丢字节；段超时 / 断流 / 字节预算三重放弃；IWDG ≈1.6 s 兜底。
-- **现场可读的故障现场**：`.noinit` 复位面包屑（阶段码 + 复位次数）+ 异常整屏色卡 + 开机五项自检。
+- **现场可读的故障现场**：`.noinit` 复位面包屑记录阶段码、累计启动次数、**上次复位原因**（上电/看门狗/软件/其它）和**上次停在哪一步**，配合异常整屏色卡 + 开机五项自检。
 - **自检命令集**：NOR 回读、资产 CRC 回读、50 块分块签名核对、动画步进探针、内部 flash `0xF000` 页擦写体检、JEDEC ID / 应用起始读回、任意槽贴图。
 
 ## 版本
 
 | 项 | 值 |
 | --- | --- |
-| 固件版本 | **v1.0.2**（`FW_VER_MAJOR 1u` / `FW_VER_MINOR 0u` / `FW_VER_PATCH 2u`，见 `src/fw.h`） |
+| 固件版本 | **v1.0.3**（`FW_VER_MAJOR 1u` / `FW_VER_MINOR 0u` / `FW_VER_PATCH 3u`，见 `src/fw.h`） |
 | 握手串 | `\x00MSN02`（6 字节） |
 | 协议帧 | 6 字节 `[class, sub, b2, b3, b4, b5]` |
-| 产物 | `build/msu2_proto_fw.hex`（50 900 B）、`build/msu2_proto_fw.bin`（18 092 B） |
-| 配套上位机 | Open_MSU2_MINI_Console **v1.0.2** |
+| 产物 | `build/msu2_proto_fw.hex`（50 532 B）、`build/msu2_proto_fw.bin`（17 960 B） |
+| 配套上位机 | Open_MSU2_MINI_Console **v1.0.2**（协议兼容，未跟版本号） |
 
 | 版本 | 要点 |
 | --- | --- |
-| **v1.0.2** | 版本帧改 7 字节三段式 `56 MA MI PA TH TL AA`；`standby_count` 真正生效：待机图片轮播只在前 `N` 个槽之间循环（`N` = 1..16，默认 16 = 全部槽）；`0A 06` 的 `count` 钳到 1..16 |
+| **v1.0.3** | 删掉 20 个 `src/main_*.c` 实验变体与 `bars` 演示（`build.ps1` 只留 `proto`）；删死接口（`class 0x02 sub 0x02` 页号、`0A 23`/`0A 24` 探针、`update_pending()`、`boot_screen_row()` 的 `label` 参数）；复位面包屑扩展成“阶段码 + 启动次数 + 复位原因 + 上次阶段码”，`0A 0D` 回包 6 → 8 字节 |
+| v1.0.2 | 版本帧改 7 字节三段式 `56 MA MI PA TH TL AA`；`standby_count` 真正生效：待机图片轮播只在前 `N` 个槽之间循环（`N` = 1..16，默认 16 = 全部槽）；`0A 06` 的 `count` 钳到 1..16 |
 | v1.0.1 | 体检页挪到 `0xF000`（链接期断言兜底）；OTA 擦前整段 CRC 预检；上传窗口 0.4 s 自愈；待机动画改非阻塞计数；触摸加中值 + 滞回；新增 `0A 15..18` 四条自检命令 |
 | v1.0.0 | 首个公开自研版本：USB CDC 流式刷屏、NOR 资产、免拆 OTA、五项自检 |
+
+**v1.0.3 变更摘要**（只动固件，上位机协议保持兼容，版本号 `FW_VER_PATCH` 2 → 3）：
+
+1. **死文件清理**：删除 20 个历史实验变体（`main_csr.c`、`main_dump.c`、`main_erase.c`、`main_ladder.c`、`main_min.c`、`main_ping.c`、`main_poll.c`、`main_probe.c`、`main_protorx.c`、`main_stage*.c`（3 个）、`main_timed.c`、`main_usb*.c`（6 个））与已编不过的 `bars` 演示 `main.c`；`build.ps1` 的变体表缩成只剩 `proto`，`-Variant` 默认值也改成 `proto`。
+2. **死接口清理**：`boot_screen_row()` 去掉从来只被 `(void)label` 丢弃的 `label` 参数（调用点同步去掉 5 个字符串字面量）；删 `class 0x02 sub 0x02`（页号只存不用，上位机从不发，老上位机若仍发则直接忽略）；删 `0A 23`（体检回包）/`0A 24`（读 `0xF000` 页）两条上位机从不发送的探针（体检功能由保留的 `0A 17` 覆盖）；删 `update_pending()` 及 `main()` 里被 `if (0)` 包住的自动搬运分支（OTA 早已改成显式命令触发）。
+3. **复位原因面包屑**：启动最开头读 `RCC->RSTSCKR`（`0x40021024`）的 `PORRSTF` / `IWDGRSTF` / `SFTRSTF` 等位，归一成 4 bit 位图后清 `RMVF` 写进 `.noinit`；同时保存“上次复位前最后记录到的阶段码”。`0A 0D` 回包由 6 字节扩成 8 字节，阶段码表新增 `10 = OTA 搬运`。
+4. 产物尺寸：`text 17 960 B`、`bss 14 696 B`，hex 50 532 B / bin 17 960 B。
 
 **v1.0.2 变更摘要**（版本号改为三段：`FW_VER_MAJOR` 1 / `FW_VER_MINOR` 0 / `FW_VER_PATCH` 2，版本帧 6 → 7 字节；上位机同步 v1.0.2）：
 
@@ -84,8 +92,7 @@ Open_MSU2_MINI_FW/
 │  ├─ regs.h              # 寄存器定义
 │  ├─ fw.h                # 全局接口与结构体（settings_t、版本号）
 │  ├─ board.c             # 时钟：HSION + 2 等待周期 + 关 PLL
-│  ├─ main_proto.c        # ★ proto 变体主程序：USB 命令/流式刷屏/待机/自检
-│  ├─ main.c              # bars 变体（默认 Variant），其余 main_*.c 为实验变体
+│  ├─ main_proto.c        # ★ 唯一主程序：USB 命令/流式刷屏/待机/自检
 │  ├─ usb.c / usb_desc.c  # USB FS 设备栈 + 干净的双接口 CDC 描述符
 │  ├─ lcd.c               # ST7735S 初始化、窗口、DMA 突发
 │  ├─ flash_spi.c         # NOR 读/写/擦、整片擦除
@@ -98,6 +105,8 @@ Open_MSU2_MINI_FW/
 ├─ builds/                # 历史镜像（MSU2_open_v29.hex，仅存档）
 └─ tools/hexfix.js        # HEX 段间空洞填 0xFF + CRLF
 ```
+
+> v1.0.3 起只保留 `proto` 一个变体：历史 `main_*.c` / `main.c` 实验程序已删除（需要时从 git 历史里找回）。
 
 ## 构建
 
@@ -120,15 +129,15 @@ $env:RISCV_TOOLCHAIN = 'C:\Users\hsush\Tools\riscv\xpack\xpack-riscv-none-elf-gc
 
 | 项 | 说明 |
 | --- | --- |
-| 默认 Variant | `bars`（点屏彩条）；日常只会用 `proto` |
-| 其它 Variant | `erase, dump, probe, usb, stage, csrtest, min, mincsr, stage_nousb, stage_usb, ladder, usbstage, usbstep, usbregs, usbforce, host, protorx, ping, direct, isrmin, poll, timed, all`，各自对应一个 `src/main_*.c` 实验程序，只用于硬件调试 |
+| 默认 Variant | `proto`（v1.0.3 起只保留这一个变体） |
+| 其它 Variant | 无；历史 `main_*.c` 实验程序已在 v1.0.3 删除 |
 | 编译选项 | `-march=rv32imac_zicsr -mabi=ilp32 -Os -ffreestanding -nostdlib -nostartfiles -Wl,--gc-sections` |
 | 产物 | `build/firmware.elf`、`build/msu2_proto_fw.hex`、`build/msu2_proto_fw.bin` |
 
 **退出码 1 是假象**：GCC 会往 stderr 打诊断信息，PowerShell 会把它当错误，脚本经常以退出码 1 结束但产物正常。判断标准是输出里有没有 `error:`，以及最后一行是否打印出
 
 ```
-msu2_proto_fw.hex: 50884 bytes, msu2_proto_fw.bin: 18084 bytes
+msu2_proto_fw.hex: 50532 bytes, msu2_proto_fw.bin: 17960 bytes
 ```
 
 构建末尾会自动执行 `node tools/hexfix.js <hex> <hex> <bin>`：把 HEX 段间空洞填成 `0xFF`、换行统一成 CRLF。不做这一步，WCHISPStudio 可能转换失败或烧完不启动。
@@ -168,9 +177,9 @@ msu2_proto_fw.hex: 50884 bytes, msu2_proto_fw.bin: 18084 bytes
 | 14 | 2 | 保留 |
 | 16 | len | 镜像本体 |
 
-镜像头的 flags 实际只用 bit0；真正的“请更新”是 `0x0A0000` 扇区里的 `0xA5` 标志（见 NOR 分区表），所以置 / 清这个标志不需要碰镜像头，擦写镜像头也不会误触发升级。
+镜像头的 flags 实际只用 bit0；`0x0A0000` 扇区里的 `0xA5` 标志（见 NOR 分区表）仍由 `0x14` 命令写入 / 清除，但 v1.0.3 起没有代码再读它（`update_pending()` 已删，升级一律由 `0x14` 显式触发），保留只是为了兼容老上位机对分区的认知。
 
-搬运结果用 `0A 0F`（上次结果）或 `0A 23` 读 `g_up_result`（`0A 23` 第 3 字节是本次体检成败，第 4 字节才是上次搬运的 `g_up_result`）：
+搬运结果用 `0A 0F`（上次结果）读 `g_up_result`：
 
 | 值 | 含义 |
 | --- | --- |
@@ -201,7 +210,7 @@ ASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xF000,
 | `0x000000` | 0x6800（26 KB） | **开机图** 1 槽（kind 0 / slot 0；槽后到 `0x008000` 留空） |
 | `0x008000 + idx*0x6800` | 0x6800 × 16 | **待机图** 16 槽（idx 0..15），末端 `0x070000` |
 | `0x080000` | 16 B + ≤48000 B | OTA 应用镜像暂存（头 16 B + 镜像） |
-| `0x0A0000` | 4 KB | “请更新”标志扇区（单独一扇，写它不碰镜像头） |
+| `0x0A0000` | 4 KB | 旧“请更新”标志扇区（v1.0.3 起固件不再读取：OTA 改显式命令触发，`update_pending()` 已删；分区保留只是为了不擦坏老上位机认的地址） |
 | `0x0FF000` | 32 B | 设置区（`CFG_MAGIC 'MS2S'` + settings_t） |
 
 每个图像槽：**20 B 头 + 25 600 B RGB565 小端数据**。
@@ -266,9 +275,11 @@ ASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xF000,
 | --- | --- | --- | --- |
 | `0x00` | 设起点 | `b2b3 = x0`，`b4b5 = y0` | 大端 |
 | `0x01` | 设终点 | `b2b3 = x1`，`b4b5 = y1` | 排他 |
-| `0x02` | 设页号 | `b2 = page` | 当前固件仅记录 |
 | `0x03` | 绘图操作 | `b2 = 操作码` | 见下表 |
 | `0x04` | 设填充单元 | `b2..b5` | 4 字节循环铺满 256 B 段 |
+
+> `0x02`（设页号）在 v1.0.3 删除：固件从来只存不用，上位机也从不发送。老上位机若仍发这一帧，固件直接忽略（无回包）。
+> `0x04` 保留：上位机老整帧路径（`raw_mode=False`）仍会发它。
 
 `sub 0x03` 操作码：
 
@@ -318,7 +329,7 @@ ASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xF000,
 | `0A` | 整片抹 NOR | — | `0A 0A 06`（擦完恢复默认设置） |
 | `0B` | 开机自检结果 | — | `0A 0B rep 00 00 00`（bit0 FLASH/bit1 TOUCH/bit2 LCD/bit3 USB/bit4 CFG） |
 | `0C` | 读 NOR | `b2b3b4 = addr(24 位)`，`b5 = 1..48` | `0A 0C n <n 字节> AA` |
-| `0D` | 复位面包屑 | — | `0A 0D stage boots_lo boots_hi AA` |
+| `0D` | 复位面包屑 | — | 8 B：`0A 0D stage boots_lo boots_hi reset_flags last_stage AA`（v1.0.3 起；旧固件回 6 字节 `0A 0D stage boots_lo boots_hi AA`） |
 | `0E` | 资产回读校验 | `b2=kind`，`b3=slot` | `0A 0E 06/15 crc_lo crc_hi AA` |
 | `0F` | 上次自更新结果 | — | `0A 0F code 00 00 00`（`g_up_result`） |
 | `10` | 动画步进探针 | `b2 = 1..40 步` | `0A 10 06 n 00 AA` |
@@ -328,17 +339,29 @@ ASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xF000,
 | `16` | 待机动画步进探针 | `b2 = 1..40 步`（0 按 1） | `0A 16 06 steps cad_hi cad_lo`（`cad` = 当前动画节拍，单位“主循环圈数/帧”） |
 | `17` | 内部 flash `0xF000` 页体检 | — | `0A 17 06/15 raw 00 00`（`raw`：0 成功 / 1 擦后读回不是 `0xFF` / 2 写后读回不一致） |
 | `18` | 贴图到屏幕 | `b2=kind`（0 开机 / 1 待机），`b3=slot`，`b4=x`、`b5=y`（有符号 int8） | `0A 18 06/15 00 00 00` |
-| `23` | 内部 flash 写序列体检 | — | `0A 23 code g_up_result 00 00`（`code` = 本次体检 06/15，第 4 字节是上次搬运的 `g_up_result`） |
-| `24` | 体检区读回 | — | 12 B：`0A 24 08 <0x0800F000 起 8 字节> AA` |
 
-`0A 00` / `0A 07` 回包里的 `fw_major` 是历史字段，只报主版本号（v1.0.2 仍是 `1`）；完整的三段版本请用 `0x56` 查询。
+> `0A 23`（内部 flash 写序列体检）与 `0A 24`（体检区读回）在 v1.0.3 删除：上位机从不发送，体检功能由 `0A 17` 覆盖（`0A 17` 的第 3 字节就是 `update_probe()` 原始码）。
+
+`0A 00` / `0A 07` 回包里的 `fw_major` 是历史字段，只报主版本号（v1.0.3 仍是 `1`）；完整的三段版本请用 `0x56` 查询。
 
 新增四条命令的细节：
 
 - `0A 15`：这 16 字节不是“自检位图”，而是 `0x08000000` 起应用区最前面的 16 B（向量表开头：初始 SP、复位 / NMI / HardFault 入口），用来核对烧进去的镜像开头；NOR 的 JEDEC ID 正常是 `85 60 14`。
 - `0A 16`：**不报毫秒**。这颗片的 SysTick 分频 / 方向不可靠，工程约定时间基准只用主循环迭代计数或 `delay_ms()`，所以第 4-5 字节是“主循环圈数/帧”：空闲时一圈末尾 `delay_ms(1)`，1 圈 ≈ 1 ms。`N` 步是同步真跑 N 次 `standby_tick()`（每步喂狗），毫秒耗时请上位机对回包做往返计时。
-- `0A 17`：只体检内部 flash 的 `0xF000` 页，不碰应用区；第 3 字节是 `update_probe()` 的原始码，便于区分“擦不干净”和“写不进”。注意 `0A 23` 的第 4 字节是 `g_up_result`（上次搬运结果），不是本次体检原始码——要看原始码用 `0A 17`。
+- `0A 17`：只体检内部 flash 的 `0xF000` 页，不碰应用区；第 3 字节是 `update_probe()` 的原始码，便于区分“擦不干净”和“写不进”。上次搬运结果（`g_up_result`）用 `0A 0F` 查。
 - `0A 18`：先 `lcd_raw_idle()` 收尾屏流并清 `standby_mode`（画上去的图不会一秒后被待机动画盖掉）；`x/y` 是有符号 int8，可以给负偏移，只画与 160×80 的交集（越界自动裁剪；完全在屏外时回 `06` 但什么也不画）；`kind>1`、待机槽号 ≥16 或槽无效回 `15`。
+
+`0A 0D` 的 8 字节字段：
+
+| 字节 | 含义 |
+| --- | --- |
+| 3 | `stage`：当前阶段码（低 4 位） |
+| 4-5 | `boots`：累计启动次数，小端 16 位 |
+| 6 | `reset_flags`：复位原因位图，bit0 上电/掉电、bit1 看门狗（IWDG）、bit2 软件复位、bit3 其它（OPA/PIN/WWDG/LPWR） |
+| 7 | `last_stage`：本次启动前最后记录到的阶段码（低 4 位），即“上次复位时停在哪一步” |
+| 8 | `0xAA` |
+
+`reset_flags` 在 `main()` 最开头、`iwdg_start()` 之前从 `RCC->RSTSCKR` 读出并清 `RMVF`，和 `last_stage` 一起写进 `.noinit` 面包屑；阶段码含义见“稳定性与故障定位”一节。v1.0.3 之前回包只有 6 字节（第 6 字节直接是 `AA`），上位机按长度区分即可。
 
 设置字段的取值与钳位（`sub 06`）：
 
@@ -364,6 +387,9 @@ ASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xF000,
 | `0x09` 原厂存档（devcfg） | 不实现，上位机发来无应答（`--selftest` 会提示“设备存档不可用”） |
 | `0x03` NOR 页命令 | 不实现，NOR 只通过 `0x0A` 资产/诊断通道访问 |
 | `0x5A` 逐帧调试详情 | 早期版本有，v1.0.0 已移除 |
+| `0x02 0x02` 设页号 | v1.0.3 删除：固件只存不用、上位机从不发送；老上位机若仍发这一帧，固件直接忽略（无回包） |
+| `0A 23` / `0A 24` 内部 flash 探针 | v1.0.3 删除：上位机从不发送，体检功能由 `0A 17` 覆盖 |
+| `update_pending()` 自动搬运 | v1.0.3 删除：OTA 早已改成显式命令（`0x14`）触发，`0x0A0000` 标志扇区不再读取 |
 
 ## 显示、开机与待机
 
@@ -414,11 +440,17 @@ ASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xF000,
 ### 复位面包屑（`.noinit`）
 
 ```c
-typedef struct { uint32_t magic, stage, boots, aux; } trace_t;   // magic = 0x4D534252 "MSBR"
+typedef struct {
+    uint32_t magic;       /* 'MSBV' = 0x4D534256；布局改过，旧内容自动作废 */
+    uint32_t stage;       /* 当前阶段码 */
+    uint32_t boots;       /* 累计启动次数 */
+    uint32_t last_stage;  /* 上次复位前最后记录到的阶段码 */
+    uint8_t  reset;       /* 本次启动的复位原因位图 */
+} trace_t;
 static volatile trace_t g_trace __attribute__((section(".noinit")));
 ```
 
-放在 `.noinit`（RAM 底部，启动不清零），掉电才丢。`trace_boot()` 每次启动 `boots++`，主流程各阶段写 `stage`；`0A 0D` 读出来就是“上次死在哪”。
+放在 `.noinit`（RAM 底部，启动不清零），掉电才丢。`main()` 最开头先读 `RCC->RSTSCKR`（`0x40021024`）把 `PORRSTF` / `IWDGRSTF` / `SFTRSTF` / 其它归一成 4 bit 位图并清 `RMVF`，再 `trace_boot()`：`boots++`、把上一次的 `stage` 存进 `last_stage`、写入本次复位原因。所以 `0A 0D` 能同时回答“上次是不是被 IWDG 复位”和“上次死在哪一步”。
 
 | 阶段码 | 位置 |
 | --- | --- |
@@ -431,6 +463,18 @@ static volatile trace_t g_trace __attribute__((section(".noinit")));
 | 7 | 淡入淡出 |
 | 8 | 整片擦除 NOR |
 | 9 | 待机动画 |
+| 10 | OTA 搬运（`update_apply()`） |
+
+复位原因位图（`0A 0D` 第 6 字节）：
+
+| 位 | 含义 | 来源 |
+| --- | --- | --- |
+| bit0 | 上电/掉电 | `RSTSCKR_PORRSTF` |
+| bit1 | 看门狗（IWDG）复位 | `RSTSCKR_IWDGRSTF` |
+| bit2 | 软件复位 | `RSTSCKR_SFTRSTF` |
+| bit3 | 其它（OPA/PIN/WWDG/LPWR） | 其余 `*RSTF` |
+
+正常上电后第一次问 `0A 0D` 应看到 `reset_flags = 0x01`；若 `0x02` 置位，说明上一次是 IWDG 超时复位，再看 `last_stage` 就知道卡在哪一阶段。地址与位定义取自 WCH `ch32x035.h` 的 `RCC_TypeDef`（`RCC_BASE + 0x24`；注意这颗片 bit25 是 `OPARSTF`，不是 STM32 的 `OBLRSTF`）。
 
 ### 异常色卡
 
@@ -440,17 +484,16 @@ static volatile trace_t g_trace __attribute__((section(".noinit")));
 
 | 想知道什么 | 用哪条命令 |
 | --- | --- |
-| 上次停在哪个阶段、复位过几次 | `0A 0D` |
+| 上次是不是看门狗复位、停在哪个阶段、启动过几次 | `0A 0D`（v1.0.3 起 8 字节，含 `reset_flags` 与 `last_stage`） |
 | 开机五项自检结果 | `0A 0B` |
 | NOR 任意位置读几个字节 | `0A 0C <24 位地址> <长度>` |
 | 某个槽的图还在不在、CRC 对不对 | `0A 0E kind slot` |
 | 屏有没有画对（50 块签名） | `0A 11` + 100 B 签名 |
 | 动画帧能不能跑满 | `0A 10 <步数>` |
 | 待机动画一步要多少圈 | `0A 16 <步数>` |
-| 这颗片的内部 flash 能不能自更新 | `0A 17`（本次擦写体检原始码，0 才算过）/ `0A 23`（06/15 + 上次 `g_up_result`） |
+| 这颗片的内部 flash 能不能自更新 | `0A 17`（本次擦写体检原始码，0 才算过） |
 | 上次自更新为什么失败 | `0A 0F` |
 | 应用区开头 16 B、NOR 的 JEDEC ID | `0A 15` |
-| 体检页现在是什么内容 | `0A 24` |
 | 把某个槽的图贴到屏上任意位置 | `0A 18 kind slot x y` |
 | 计时基准是否正常 | 开机时的 `77 …` 自检帧 |
 

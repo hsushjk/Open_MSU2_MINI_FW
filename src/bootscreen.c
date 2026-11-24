@@ -24,13 +24,13 @@ void boot_screen_begin(void)
     lcd_fill(0, 0, 160, 80, COL_BG);
 }
 
-/* state：0=进行中(灰) 1=通过(绿) 2=失败(红) */
-void boot_screen_row(uint8_t row, const char *label, uint8_t state)
+/* state：0=进行中(灰) 1=通过(绿) 2=失败(红)。屏幕上不画字，行号即检查项，
+ * 各行的含义（FLASH / TOUCH / LCD / USB / CFG）见 README。 */
+void boot_screen_row(uint8_t row, uint8_t state)
 {
     int y = CHK_Y0 + (int)row * CHK_STEP;
     uint16_t col = (state == 1u) ? COL_OK : (state == 2u) ? COL_BAD : COL_WAIT;
 
-    (void)label;             /* 不用文字，参数保留是为了接口稳定 */
     lcd_fill(CHK_X, y, CHK_SIZE, CHK_SIZE, col);
 }
 

@@ -176,29 +176,6 @@ void update_clear_apply_flag(void)
     flash_erase_4k(APPLY_FLAG_ADDR);
 }
 
-static int apply_flag_set(void)
-{
-    uint8_t v = 0u;
-
-    flash_read(APPLY_FLAG_ADDR, &v, 1);
-    return (v == 0xA5u) ? 1 : 0;
-}
-
-int update_pending(void)
-{
-    uint8_t hdr[APPIMG_HDR];
-
-    if (!apply_flag_set())
-        return 0;
-    flash_read(APPIMG_ADDR, hdr, APPIMG_HDR);
-    if (hdr[0] != APPIMG_MAGIC0 || hdr[1] != APPIMG_MAGIC1 ||
-        hdr[2] != APPIMG_MAGIC2 || hdr[3] != APPIMG_MAGIC3)
-        return 0;
-    if ((hdr[4] & APPIMG_FLAG_VALID) == 0u)
-        return 0;
-    return 1;
-}
-
 /* ---------------- 真正擦写内部 flash 的那一段：跑在 RAM 里 ----------------
  *
  * 这一段的寄存器序列照抄 WCH 官方 SDK（ch32x035_flash.c 的 FLASH_ROM_WRITE /

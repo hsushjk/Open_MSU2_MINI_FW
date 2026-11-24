@@ -27,11 +27,9 @@ reset_entry:
     la      gp, __global_pointer$
     .option pop
 
-#ifndef STARTUP_NO_CSR
-    /* 向量模式：mtvec=7 表示基址 4 */
+/* 向量模式：mtvec=7 表示基址 4 */
     li      t0, 7
     csrw    0x305, t0
-#endif
 
     /* copy .data from flash to RAM */
     la      t0, _sidata
@@ -54,10 +52,8 @@ reset_entry:
 
     /* mstatus = 0x88：MIE=1，开总中断 */
 4:
-#ifndef STARTUP_NO_CSR
     li      t0, 0x88
     csrw    0x300, t0
-#endif
     call    main
 
     j       trap_loop

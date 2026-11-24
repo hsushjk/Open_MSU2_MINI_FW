@@ -4,7 +4,6 @@
  *   class 0  sub 0x4D         握手（设备发 MSN02，主机回 MSNCN）
  *   class 2  sub 0            x0, y0
  *   class 2  sub 1            x1, y1（终点，不是宽高）
- *   class 2  sub 2            底色 / 页号
  *   class 2  sub 3  op 0      纯色填充   colour = b3:b4
  *                   op 7      开始流式   set_window(x0,y0,x1-1,y1-1) + CS 拉低
  *                   op 8      推一段     len = b3:b4（满段 0x0100）
@@ -13,7 +12,8 @@
  *   class 2  sub 4            段缓冲填充：4 字节循环铺满 256 字节
  *   class 4                   段缓冲写入：seg[b1*4 ..] = b2..b5
  *   class 8                   读 ADC：回 [0x08, ch, 0, 0, hi, lo]
- */
+ *
+ * 已移除：class 2 sub 2（页号）。老上位机若仍发这一帧，固件直接忽略即可。 */
 #include "fw.h"
 
 static uint8_t seg[256];
@@ -89,16 +89,21 @@ static void iwdg_feed(void);
 /* ---------- 复位原因面包屑 ----------
  * 放在链接脚本的 .noinit 段（RAM 最底部，不加载、不清零），不复位电源就跨复位保留。
  * 每次走到关键阶段就记一个码；异常复位（看门狗/硬件错）后这个码还留着，
- * 上位机一问就知道"上次是死在哪一步"。
+ * 上位机一问（0A 0D）就知道"上次是死在哪一步"。
  *   1=main 开始  2=usb_init 完成  3=开机画面  4=主循环  5=收像素
- *   6=写资产    7=淡入淡出      8=整片擦除  9=待机动画 */
-#define TRACE_MAGIC 0x4D534252u
+ *   6=写资产    7=淡入淡出      8=整片擦除  9=待机动画
+ *  10=OTA 搬运（update_apply；成功就复位，失败回老固件继续跑）
+ *
+ * 复位原因从 RCC->RSTSCKR 读（地址和位定义见下面），last_stage 是"本次启动前
+ * 最后记录到的阶段码"，也就是上次复位时停在哪一步。 */
+#define TRACE_MAGIC 0x4D534256u   /* 'MSBV' v2：结构改过，旧面包屑自动作废 */
 
 typedef struct {
     uint32_t magic;
-    uint32_t stage;
-    uint32_t boots;
-    uint32_t aux;
+    uint32_t stage;       /* 当前阶段码 */
+    uint32_t boots;       /* 累计启动次数 */
+    uint32_t last_stage;  /* 上次复位前最后记录到的阶段码 */
+    uint8_t  reset;       /* 本次启动的复位原因位图 */
 } trace_t;
 
 static volatile trace_t g_trace __attribute__((section(".noinit")));
@@ -106,14 +111,54 @@ static volatile trace_t g_trace __attribute__((section(".noinit")));
 #define TRACE (&g_trace)
 #define TRACE_STAGE(s) (TRACE->stage = (uint32_t)(s))
 
-static void trace_boot(void)
+/* RCC->RSTSCKR。地址取自 WCH ch32x035.h：RCC_BASE = 0x40021000，
+ * RCC_TypeDef 依次是 CTLR / CFGR0 / RESERVED0 / APB2PRSTR / APB1PRSTR /
+ * AHBPCENR / APB2PCENR / APB1PCENR / RESERVED1 / RSTSCKR / AHBRSTR，
+ * 所以 RSTSCKR = 0x40021024。位定义同样取自该头文件（注意这颗片 bit25 是
+ * OPARSTF，不是 STM32 的 OBLRSTF）。 */
+#define RCC_RSTSCKR      (*(volatile uint32_t *)0x40021024u)
+#define RSTSCKR_RMVF     0x01000000u
+#define RSTSCKR_OPARSTF  0x02000000u
+#define RSTSCKR_PINRSTF  0x04000000u
+#define RSTSCKR_PORRSTF  0x08000000u
+#define RSTSCKR_SFTRSTF  0x10000000u
+#define RSTSCKR_IWDGRSTF 0x20000000u
+#define RSTSCKR_WWDGRSTF 0x40000000u
+#define RSTSCKR_LPWRRSTF 0x80000000u
+
+/* 复位原因位图（0A 0D 回包第 6 字节）：
+ *   bit0 上电/掉电  bit1 看门狗  bit2 软件复位  bit3 其它（OPA/PIN/WWDG/LPWR）
+ * 必须在 iwdg_start() 之前调用，并且读一次就清 RMVF，否则下次复位会沿用这次的标志。 */
+static uint8_t reset_cause_read(void)
 {
-    if (TRACE->magic != TRACE_MAGIC) {
+    uint32_t v = RCC_RSTSCKR;
+    uint8_t flags = 0u;
+
+    if (v & RSTSCKR_PORRSTF)
+        flags |= 0x01u;
+    if (v & RSTSCKR_IWDGRSTF)
+        flags |= 0x02u;
+    if (v & RSTSCKR_SFTRSTF)
+        flags |= 0x04u;
+    if (v & (RSTSCKR_OPARSTF | RSTSCKR_PINRSTF | RSTSCKR_WWDGRSTF | RSTSCKR_LPWRRSTF))
+        flags |= 0x08u;
+    RCC_RSTSCKR = RSTSCKR_RMVF;
+    return flags;
+}
+
+static void trace_boot(uint8_t reset_flags)
+{
+    uint32_t prev = 0u;
+
+    if (TRACE->magic == TRACE_MAGIC)
+        prev = TRACE->stage;      /* 上电 / 旧布局时 magic 对不上，prev 保持 0 */
+    else {
         TRACE->magic = TRACE_MAGIC;
-        TRACE->stage = 0u;
         TRACE->boots = 0u;
-        TRACE->aux = 0u;
     }
+    TRACE->stage = 0u;
+    TRACE->last_stage = prev;
+    TRACE->reset = reset_flags;
     TRACE->boots = TRACE->boots + 1u;
 }
 
@@ -579,7 +624,6 @@ static volatile uint32_t frame_done;
 
 static int x0, y0, x1, y1;
 static int connected;
-static uint8_t page_no;
 
 static const uint8_t hello[6] = { 0x00, 0x4D, 0x53, 0x4E, 0x30, 0x32 };
 static uint32_t hb_hold;		/* >0：暂缓心跳，给应答包让路 */
@@ -692,9 +736,6 @@ static void handle_frame(const uint8_t *f)
             x1 = a;
             y1 = b;
             return;
-        case 0x02:
-            page_no = (uint8_t)a;
-            return;
         case 0x03:
             switch (f[2]) {
             case 0x00:
@@ -800,6 +841,7 @@ static void handle_frame(const uint8_t *f)
         /* update_apply() 全身在 RAM：先整段重算 CRC 比对镜像头（对不上就返回 5，
            内部 flash 一个字节没动），再体检 0xF000 页；都过了才关中断、擦应用区、
            逐页搬、再复位。 */
+        TRACE_STAGE(10u);             /* OTA 搬运：搬一半挂了也能从面包屑看出来 */
         (void)update_apply();
         /* 能走到这里说明搬运失败（否则已经复位） */
         update_clear_apply_flag();
@@ -841,22 +883,6 @@ static void handle_frame(const uint8_t *f)
             r[2] = g_boot_report;
             r[3] = 0u; r[4] = 0u; r[5] = 0u;
             usb_write(r, 6);
-            return;
-        }
-        if (sub == 0x23u) {                    /* 内部 flash 写序列体检（擦+写+读回 0xF000 页） */
-            uint8_t code = (uint8_t)(update_probe() == 0 ? 0x06u : 0x15u);
-            r[0] = 0x0Au; r[1] = 0x23u; r[2] = code;
-            r[3] = (uint8_t)g_up_result; r[4] = 0u; r[5] = 0u;
-            usb_write(r, 6);
-            return;
-        }
-        if (sub == 0x24u) {                    /* 读回 0xF000 体检页的 8 字节 */
-            uint32_t i;
-            r[0] = 0x0Au; r[1] = 0x24u; r[2] = 8u;
-            for (i = 0u; i < 8u; i++)
-                r[3 + i] = *(volatile uint8_t *)(0x08000000u + IFLASH_PROBE_ADDR + i);
-            r[11] = 0xAAu;
-            usb_write(r, 12);
             return;
         }
         /* ---- 自检扩展（v1.0.1 新增，编号 0x15..0x18 此前未占用）----
@@ -1077,15 +1103,18 @@ static void handle_frame(const uint8_t *f)
             usb_write(r, 6);
             return;
         }
-        if (sub == 0x0Du) {                    /* 复位面包屑：上次停在哪一步 */
+        if (sub == 0x0Du) {                    /* 复位面包屑：上次停在哪一步 + 复位原因
+                                        * [0A,0D,stage,boots_lo,boots_hi,reset_flags,last_stage,AA] */
             uint32_t boots = TRACE->boots;
 
             r[0] = 0x0Au; r[1] = 0x0Du;
             r[2] = (uint8_t)(TRACE->stage & 0xFu);
             r[3] = (uint8_t)(boots & 0xFFu);
             r[4] = (uint8_t)((boots >> 8) & 0xFFu);
-            r[5] = 0xAAu;
-            usb_write(r, 6);
+            r[5] = TRACE->reset;
+            r[6] = (uint8_t)(TRACE->last_stage & 0xFu);
+            r[7] = 0xAAu;
+            usb_write(r, 8);
             return;
         }
         if (sub == 0x0Eu) {                    /* 资产回读校验：kind idx */
@@ -1170,11 +1199,11 @@ static void handle_frame(const uint8_t *f)
                                            ((rep & 0x10u) ? 1 : 0));
 
                 boot_screen_begin();
-                boot_screen_row(0u, "FLASH", (uint8_t)((rep & 0x01u) ? 1u : 2u));
-                boot_screen_row(1u, "TOUCH", (uint8_t)((rep & 0x02u) ? 1u : 2u));
-                boot_screen_row(2u, "LCD",   (uint8_t)((rep & 0x04u) ? 1u : 2u));
-                boot_screen_row(3u, "USB",   (uint8_t)((rep & 0x08u) ? 1u : 2u));
-                boot_screen_row(4u, "CFG",   (uint8_t)((rep & 0x10u) ? 1u : 2u));
+                boot_screen_row(0u, (uint8_t)((rep & 0x01u) ? 1u : 2u));
+                boot_screen_row(1u, (uint8_t)((rep & 0x02u) ? 1u : 2u));
+                boot_screen_row(2u, (uint8_t)((rep & 0x04u) ? 1u : 2u));
+                boot_screen_row(3u, (uint8_t)((rep & 0x08u) ? 1u : 2u));
+                boot_screen_row(4u, (uint8_t)((rep & 0x10u) ? 1u : 2u));
                 boot_screen_done(passed, 5u);
                 blink_first = 1u;
             } else if (standby_mode) {
@@ -1223,8 +1252,9 @@ static void iwdg_feed(void)
 int main(void)
 {
     int rx_len = 0;
+    uint8_t rst = reset_cause_read();   /* 必须在 iwdg_start() 之前、且只读一次 */
 
-    trace_boot();
+    trace_boot(rst);
     TRACE_STAGE(1u);
 
     RCC->APB2PCENR |= RCC_APB2_GPIOA | RCC_APB2_GPIOB | RCC_APB2_GPIOC | RCC_APB2_AFIO;
@@ -1232,16 +1262,6 @@ int main(void)
     lcd_gpio_init();
     lcd_init();
     lcd_fill(0, 0, 160, 80, 0x0000);
-
-    /* 上次点过“一键刷机”：镜像已在 NOR 里，这里把它写进内部 flash 并重启。
-     * update_apply() 跑在 RAM 里；体检不过就返回，设备继续用老固件，不会变砖。 */
-    /* v76: 自动搬运已停用 —— NOR 里可能留着上一版失败的镜像，
-       上电时先别碰内部 flash，等主机显式下发命令再搬。 */
-    /* 搬运交给 0x0000 的常驻引导 */
-    if (0) {
-        (void)update_apply();
-        update_clear_apply_flag();
-    }
 
     {
         /* 开机自检：结果既画在屏上（boot_mode==2），也存进 g_boot_report 供上位机查 */
@@ -1280,11 +1300,11 @@ int main(void)
             uint32_t ms = 1500u;
 
             boot_screen_begin();
-            boot_screen_row(0u, "FLASH", (uint8_t)((rep & 0x01u) ? 1u : 2u));
-            boot_screen_row(1u, "TOUCH", (uint8_t)((rep & 0x02u) ? 1u : 2u));
-            boot_screen_row(2u, "LCD",   (uint8_t)((rep & 0x04u) ? 1u : 2u));
-            boot_screen_row(3u, "USB",   (uint8_t)((rep & 0x08u) ? 1u : 2u));
-            boot_screen_row(4u, "CFG",   (uint8_t)((rep & 0x10u) ? 1u : 2u));
+            boot_screen_row(0u, (uint8_t)((rep & 0x01u) ? 1u : 2u));
+            boot_screen_row(1u, (uint8_t)((rep & 0x02u) ? 1u : 2u));
+            boot_screen_row(2u, (uint8_t)((rep & 0x04u) ? 1u : 2u));
+            boot_screen_row(3u, (uint8_t)((rep & 0x08u) ? 1u : 2u));
+            boot_screen_row(4u, (uint8_t)((rep & 0x10u) ? 1u : 2u));
             boot_screen_done(passed, 5u);
             while (ms > 0u) {
                 iwdg_feed();

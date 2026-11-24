@@ -20,7 +20,7 @@ void lcd_data8(uint8_t value);
 void lcd_fill(int x, int y, int w, int h, uint16_t colour);
 /* 开机自检画面（bootscreen.c） */
 void boot_screen_begin(void);
-void boot_screen_row(uint8_t row, const char *label, uint8_t state);
+void boot_screen_row(uint8_t row, uint8_t state);
 void boot_screen_done(uint8_t passed, uint8_t total);
 void lcd_blit(int x, int y, int w, int h, const uint8_t *bytes_pixels);
 void lcd_set_window(int x0, int y0, int x1, int y1);
@@ -49,15 +49,14 @@ int     flash_is_blank(uint32_t addr, int n);
 /* ---- 免拆自更新（selfupdate.c） ---- */
 /* 内部 flash 体检页：应用区只到 0xEFFF（link.ld 里 60 KB 且有 ASSERT），
  * 所以体检只能用 0xF000 这一页；原来的 0x7000 落在应用区里，固件一大
- * 体检就会把正在跑的代码擦掉。OTA 的 update_apply() 和 0A 23/0A 17
- * 的 update_probe() 都必须用这一个地址。 */
+ * 体检就会把正在跑的代码擦掉。OTA 的 update_apply() 和 0A 17 的
+ * update_probe() 都必须用这一个地址。 */
 #define IFLASH_PROBE_ADDR 0xF000u
 int  update_stage_begin(uint32_t len);
 void update_stage_feed(const uint8_t *src, int n);
 int  update_stage_commit(uint32_t crc);
 void update_set_apply_flag(void);
 void update_clear_apply_flag(void);
-int  update_pending(void);
 int  update_apply(void);
 int  update_probe(void);
 extern volatile uint8_t g_up_result;   /* last update result: 0 ok, 1..4 failure stage */
@@ -145,7 +144,7 @@ extern uint8_t  cfg_selected;
 #define FW_VER_MINOR  0u
 #endif
 #ifndef FW_VER_PATCH
-#define FW_VER_PATCH  2u
+#define FW_VER_PATCH  3u
 #endif
 
 #endif /* FW_H */
