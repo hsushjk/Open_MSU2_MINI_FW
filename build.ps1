@@ -62,7 +62,8 @@ $bin = Join-Path $build ($tag + '.bin')
 $arch   = @('-march=rv32imac_zicsr', '-mabi=ilp32')
 $cflags = $arch + @('-Os', '-std=c11', '-ffreestanding', '-fno-common',
                     '-Wall', '-Wextra', '-ffunction-sections', '-fdata-sections', '-g')
-$ldflags = $arch + @('-nostdlib', '-nostartfiles', '-Wl,--gc-sections', '-T', 'link.ld')
+$ldflags = $arch + @('-nostdlib', '-nostartfiles', '-Wl,--gc-sections',
+                     '-Wl,--no-warn-rwx-segments', '-T', 'link.ld')
 
 Write-Host "== compile + link ($Variant)"
 if ($Variant -eq 'csrtest' -or $Variant -eq 'min') { $cflags += '-DSTARTUP_NO_CSR' }

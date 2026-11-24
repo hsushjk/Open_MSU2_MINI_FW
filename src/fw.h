@@ -142,7 +142,10 @@ extern uint8_t  cfg_selected;
 #define FW_VER_MAJOR  1u
 #endif
 #ifndef FW_VER_MINOR
-#define FW_VER_MINOR  2u
+#define FW_VER_MINOR  0u
+#endif
+#ifndef FW_VER_PATCH
+#define FW_VER_PATCH  2u
 #endif
 
 #endif /* FW_H */

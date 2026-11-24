@@ -664,16 +664,19 @@ static void handle_frame(const uint8_t *f)
             usb_write(f, 6);
             return;
         }
-        if (sub == 0x56u) {                       /* 版本查询：不主动发送，只应答 */
-            uint8_t st[6];
+        if (sub == 0x56u) {                       /* 版本查询：不主动发送，只应答
+                                                   * v1.0.2 起 7 字节：
+                                                   * 56 MA MI PA TH TL AA */
+            uint8_t st[7];
             uint16_t tv = adc_read(9u);
             st[0] = 0x56u;
             st[1] = FW_VER_MAJOR;
             st[2] = FW_VER_MINOR;
-            st[3] = (uint8_t)((tv >> 8) & 0xFFu);
-            st[4] = (uint8_t)(tv & 0xFFu);
-            st[5] = 0xAAu;
-            usb_write(st, 6);
+            st[3] = FW_VER_PATCH;
+            st[4] = (uint8_t)((tv >> 8) & 0xFFu);
+            st[5] = (uint8_t)(tv & 0xFFu);
+            st[6] = 0xAAu;
+            usb_write(st, 7);
             return;
         }
         return;
@@ -826,7 +829,7 @@ static void handle_frame(const uint8_t *f)
             r[7] = g_settings.standby_count;
             r[8] = (uint8_t)((g_settings.dwell >> 8) & 0xFFu);
             r[9] = (uint8_t)(g_settings.dwell & 0xFFu);
-            r[10] = FW_VER_MAJOR;
+            r[10] = FW_VER_MAJOR;             /* 老字段：只报主版本，完整三段见 0x56 查询 */
             r[11] = g_settings.boot_hold;
             r[12] = 0u;
             r[13] = 0xAAu;
