@@ -306,15 +306,29 @@ static void ball_step(void)
 }
 
 /* 画待机画面：黑屏 / 四角方块 / 图片轮播 / Ping-Pong */
-/* 从 from 的下一个开始，找一个有图的槽；都没有返回 0xFF */
+
+/* 轮播上限：standby_count 有效（1..STANDBY_SLOTS）时只在前 N 个槽里循环；
+ * 协议/存档都钳过，这里是内存值的兜底——异常值退回全部槽，行为与旧固件一致。 */
+static uint8_t standby_limit(void)
+{
+    if (g_settings.standby_count >= 1u && g_settings.standby_count <= STANDBY_SLOTS)
+        return (uint8_t)g_settings.standby_count;
+    return (uint8_t)STANDBY_SLOTS;
+}
+
+/* 从 from 的下一个开始，在限定的前 lim 个槽里找一个有图的槽；都没有返回 0xFF。
+ * from 越界（张数改小后旧索引 >= lim，或 0xFF“从头找”）就从槽 0 起扫，
+ * 即回落到第一个有效槽，不会停在越界槽上把画面留空。 */
 static uint8_t next_valid_slot(uint8_t from)
 {
     uint8_t k;
+    uint8_t lim = standby_limit();
+    uint8_t base = (from < lim) ? from : (uint8_t)(lim - 1u);   /* 0xFF/越界 = 从头找 */
 
-    for (k = 1u; k <= STANDBY_SLOTS; k++) {
-        uint8_t idx = (uint8_t)((from + k) % STANDBY_SLOTS);
+    for (k = 1u; k <= lim; k++) {
+        uint8_t idx = (uint8_t)((base + k) % lim);
 
-        if (asset_valid(ASSET_STANDBY, idx))
+        if (asset_valid(ASSET_STANDBY, idx))    /* 掩码用真实槽号：idx < lim <= STANDBY_SLOTS */
             return idx;
     }
     return 0xFFu;
@@ -396,7 +410,8 @@ static void standby_draw(void)
         return;
     }
     if (g_settings.standby_mode == 2u) {
-        uint8_t first = next_valid_slot(0xFFu);    /* 0xFF 当作“从头找” */
+        /* 0xFF 当作“从头找”；范围由 standby_limit() 限定在前 count 个槽 */
+        uint8_t first = next_valid_slot(0xFFu);
 
         img_idx = (first == 0xFFu) ? 0u : first;
         if (first == 0xFFu || !asset_valid(ASSET_STANDBY, img_idx))
@@ -426,13 +441,17 @@ static void standby_tick(void)
 {
     TRACE_STAGE(9u);
     if (g_settings.standby_mode == 2u) {
-        uint8_t nx = next_valid_slot(img_idx);
+        uint8_t lim = standby_limit();
+        /* 张数改小后当前索引可能已经越界：当作“从头找”，回落到第一个有效槽 */
+        uint8_t nx = next_valid_slot((img_idx < lim) ? img_idx : 0xFFu);
 
         if (nx == 0xFFu) {
             lcd_fill(0, 0, 160, 80, 0x0000);
             return;
         }
         {
+            /* 淡出端仍用当前实际显示的那个槽（越界但有效的槽也要能读，
+             * 否则会先黑一下再淡入） */
             uint8_t prev = asset_valid(ASSET_STANDBY, img_idx) ? img_idx : 0xFFu;
 
             img_idx = nx;
@@ -1130,8 +1149,11 @@ static void handle_frame(const uint8_t *f)
                 g_settings.boot_mode = 0u;
             if (g_settings.standby_mode > 4u)
                 g_settings.standby_mode = 1u;
-            if (g_settings.standby_count == 0u || g_settings.standby_count > 8u)
+            /* count 限定轮播只在前 N 个槽循环：钳到 1..STANDBY_SLOTS（0 → 1，>16 → 16） */
+            if (g_settings.standby_count == 0u)
                 g_settings.standby_count = 1u;
+            else if (g_settings.standby_count > STANDBY_SLOTS)
+                g_settings.standby_count = (uint8_t)STANDBY_SLOTS;
             if (g_settings.dwell == 0u)
                 g_settings.dwell = 3u;
             settings_save(&g_settings);

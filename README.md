@@ -1,6 +1,6 @@
 # Open_MSU2_MINI_FW
 
-MSU2_MINI 小屏（CH32X033F8P6 + P25D80H + ST7735S 160×80）的自研固件 **v1.0.1**：不基于原厂固件、不链接 WCH 库，`-nostdlib` 从 `_start` 起手写，实现 USB CDC 流式刷屏、NOR 图像资产、触摸采样、开机/待机动画、免拆自更新和一套自诊断命令。
+MSU2_MINI 小屏（CH32X033F8P6 + P25D80H + ST7735S 160×80）的自研固件 **v1.0.2**：不基于原厂固件、不链接 WCH 库，`-nostdlib` 从 `_start` 起手写，实现 USB CDC 流式刷屏、NOR 图像资产、触摸采样、开机/待机动画、免拆自更新和一套自诊断命令。
 
 ## 关键特性
 
@@ -16,16 +16,23 @@ MSU2_MINI 小屏（CH32X033F8P6 + P25D80H + ST7735S 160×80）的自研固件 **
 
 | 项 | 值 |
 | --- | --- |
-| 固件版本 | **v1.0.1**（`FW_VER_MAJOR 1u` / `FW_VER_MINOR 1u`，见 `src/fw.h`） |
+| 固件版本 | **v1.0.2**（`FW_VER_MAJOR 1u` / `FW_VER_MINOR 2u`，见 `src/fw.h`） |
 | 握手串 | `\x00MSN02`（6 字节） |
 | 协议帧 | 6 字节 `[class, sub, b2, b3, b4, b5]` |
-| 产物 | `build/msu2_proto_fw.hex`（50 638 B）、`build/msu2_proto_fw.bin`（18 000 B） |
+| 产物 | `build/msu2_proto_fw.hex`（50 884 B）、`build/msu2_proto_fw.bin`（18 084 B） |
 | 配套上位机 | Open_MSU2_MINI_Console **v1.0.0** |
 
 | 版本 | 要点 |
 | --- | --- |
-| **v1.0.1** | 体检页挪到 `0xF000`（链接期断言兜底）；OTA 擦前整段 CRC 预检；上传窗口 0.4 s 自愈；待机动画改非阻塞计数；触摸加中值 + 滞回；新增 `0A 15..18` 四条自检命令 |
+| **v1.0.2** | `standby_count` 真正生效：待机图片轮播只在前 `N` 个槽之间循环（`N` = 1..16，默认 16 = 全部槽）；`0A 06` 的 `count` 钳到 1..16 |
+| v1.0.1 | 体检页挪到 `0xF000`（链接期断言兜底）；OTA 擦前整段 CRC 预检；上传窗口 0.4 s 自愈；待机动画改非阻塞计数；触摸加中值 + 滞回；新增 `0A 15..18` 四条自检命令 |
 | v1.0.0 | 首个公开自研版本：USB CDC 流式刷屏、NOR 资产、免拆 OTA、五项自检 |
+
+**v1.0.2 变更摘要**（`FW_VER_MINOR` 1 → 2，只更新固件，上位机仍是 v1.0.0）：
+
+1. 待机图片轮播上限改为按 `standby_count` 走：`standby_limit()` 取 1..16 的有效内存值，异常时退回 `STANDBY_SLOTS`（16 = 全部槽），默认行为与 v1.0.1 完全一致。
+2. `next_valid_slot()` 只在前 N 个槽里找图；张数改小后旧索引越界（`>= N`）时从槽 0 重扫，回落到第一个有效槽，不会停在越界槽上把画面留空。
+3. `0A 06` 写入的 `count` 钳到 1..16（0 → 1，>16 → 16），此前上限是 8。
 
 **v1.0.1 变更摘要**（`FW_VER_MINOR` 0 → 1）：
 
@@ -36,7 +43,7 @@ MSU2_MINI 小屏（CH32X033F8P6 + P25D80H + ST7735S 160×80）的自研固件 **
 5. 待机闪烁不再用阻塞 `delay_ms(1)` 循环，改成主循环计数 `standby_wait`（模式 1 约 1 s、模式 2 按 `dwell`、模式 3 每 20 圈一步），等待期间命令照常处理。
 6. 触摸读数加 `adc_filtered()`：每通道 3 拍滑窗中值 + 8 LSB 滞回，`class 0x08` 回包长度不变。
 
-版本号从 v1.0.0 起统一重置：当时固件与上位机同号；v1.0.1 只更新固件，上位机仍是 v1.0.0。旧文档里的 v28 / v31 / v60 / v81 只是历史演进编号，不再是“当前版本”。
+版本号从 v1.0.0 起统一重置：当时固件与上位机同号；v1.0.1 / v1.0.2 只更新固件，上位机仍是 v1.0.0。旧文档里的 v28 / v31 / v60 / v81 只是历史演进编号，不再是“当前版本”。
 
 ## 硬件
 
@@ -120,7 +127,7 @@ $env:RISCV_TOOLCHAIN = 'C:\Users\hsush\Tools\riscv\xpack\xpack-riscv-none-elf-gc
 **退出码 1 是假象**：GCC 会往 stderr 打诊断信息，PowerShell 会把它当错误，脚本经常以退出码 1 结束但产物正常。判断标准是输出里有没有 `error:`，以及最后一行是否打印出
 
 ```
-msu2_proto_fw.hex: 50638 bytes, msu2_proto_fw.bin: 18000 bytes
+msu2_proto_fw.hex: 50884 bytes, msu2_proto_fw.bin: 18084 bytes
 ```
 
 构建末尾会自动执行 `node tools/hexfix.js <hex> <hex> <bin>`：把 HEX 段间空洞填成 `0xFF`、换行统一成 CRLF。不做这一步，WCHISPStudio 可能转换失败或烧完不启动。
@@ -305,7 +312,7 @@ ASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xF000,
 | `03` | 提交 CRC32 | `b2..b5 = crc` | `0A 03 06/15`（对上才写 16 B 镜像头） |
 | `04` | 预览槽 | `b2=kind`，`b3=slot` | `0A 04 06/15` |
 | `05` | 擦除槽 | `b2=kind`，`b3=slot` | `0A 05 06` |
-| `06` | 存设置 | `b2=boot_mode`，`b3=standby_mode`，`b4=count`，`b5=dwell` | `0A 06 06` |
+| `06` | 存设置 | `b2=boot_mode`，`b3=standby_mode`，`b4=count`（1..16，超出自动钳住），`b5=dwell` | `0A 06 06` |
 | `09` | 开机停留秒数 | `b2 = 1..60` | `0A 09 06 secs 00 00` |
 | `0A` | 整片抹 NOR | — | `0A 0A 06`（擦完恢复默认设置） |
 | `0B` | 开机自检结果 | — | `0A 0B rep 00 00 00`（bit0 FLASH/bit1 TOUCH/bit2 LCD/bit3 USB/bit4 CFG） |
@@ -336,7 +343,7 @@ ASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xF000,
 | --- | --- | --- |
 | boot_mode | 0 不画 / 1 显示 NOR 开机图 / 2 开机跑自检并显示结果 | >2 → 0 |
 | standby_mode | 0 黑屏 / 1 四角方块闪光 / 2 图片轮播 / 3 Ping-Pong 小球 / 4 预留 | >4 → 1 |
-| standby_count | 轮播张数（当前轮播固定遍历全部 16 槽、空槽跳过，此字段只保存和回读） | 0 或 >8 → 1 |
+| standby_count | 轮播张数：限定轮播只在前 N 个有效槽之间循环，`N` 取 1..16，默认 16（=全部槽），空槽跳过 | 0 → 1，>16 → 16 |
 | dwell | 每张停留秒数 1..60 | 0 → 3 |
 | boot_hold | 开机图停留秒数 1..60 | 0 → 4 |
 
@@ -385,7 +392,7 @@ ASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xF000,
 | --- | --- | --- |
 | 0 | 黑屏 | — |
 | 1 | 四角 8×8 方块白/琥珀交替（`0xFFFF` / `0xFC80`） | `STANDBY_BLINK_TICKS` = 1000 拍 ≈1 s 翻转 |
-| 2 | 16 槽图片轮播，槽间 8 步交叉淡入淡出（空槽跳过） | `dwell × 1000` 拍 ≈`dwell` 秒 |
+| 2 | 图片轮播：只在前 N 个槽（`N` = `standby_count`，1..16，默认 16 = 全部槽）之间循环，槽间 8 步交叉淡入淡出（空槽跳过） | `dwell × 1000` 拍 ≈`dwell` 秒 |
 | 3 | Ping-Pong 小球：10×10 方块、13 点拖尾渐暗、撞边换色、随机起点方向 | 20 拍/步 ≈20 ms |
 | 4 | 预留（当前画四角白方块后静止） | — |
 

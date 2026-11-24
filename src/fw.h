@@ -70,7 +70,7 @@ uint32_t asset_crc32_bytes(uint32_t crc, const uint8_t *p, int n);
 typedef struct {
     uint8_t  boot_mode;      /* 0=不画 1=画 NOR 里的开机图 */
     uint8_t  standby_mode;   /* 0=黑屏 1=四角方块 2=图片轮播 3=弹球 4=呼吸 */
-    uint8_t  standby_count;  /* 轮播图片张数 1..8 */
+    uint8_t  standby_count;  /* 轮播图片张数 1..16（只在前 N 个槽循环） */
     uint16_t dwell;          /* 每张停留秒数 */
     uint8_t  boot_hold;      /* 开机画面停留秒数 1..60（0 当作 4） */
 } settings_t;
@@ -142,7 +142,7 @@ extern uint8_t  cfg_selected;
 #define FW_VER_MAJOR  1u
 #endif
 #ifndef FW_VER_MINOR
-#define FW_VER_MINOR  1u
+#define FW_VER_MINOR  2u
 #endif
 
 #endif /* FW_H */
