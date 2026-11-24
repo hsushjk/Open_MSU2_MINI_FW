@@ -13,7 +13,7 @@
  *   class 4                   段缓冲写入：seg[b1*4 ..] = b2..b5
  *   class 8                   读 ADC：回 [0x08, ch, 0, 0, hi, lo]
  *
- * 已移除：class 2 sub 2（页号）。老上位机若仍发这一帧，固件直接忽略即可。 */
+ * 未实现 class 2 sub 2（页号）：收到该帧一律忽略。 */
 #include "fw.h"
 
 static uint8_t seg[256];
@@ -364,7 +364,7 @@ static void ball_step(void)
 /* 画待机画面：黑屏 / 四角方块 / 图片轮播 / Ping-Pong */
 
 /* 轮播上限：standby_count 有效（1..STANDBY_SLOTS）时只在前 N 个槽里循环；
- * 协议/存档都钳过，这里是内存值的兜底——异常值退回全部槽，行为与旧固件一致。 */
+ * 协议与存档都钳过，这里是内存值的兜底：异常值退回全部槽重画。 */
 static uint8_t standby_limit(void)
 {
     if (g_settings.standby_count >= 1u && g_settings.standby_count <= STANDBY_SLOTS)

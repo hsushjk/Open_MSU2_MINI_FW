@@ -415,7 +415,7 @@ int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
     }
 
     /* 2. 整段 CRC 预检：把 NOR 里的镜像再逐块读一遍算 CRC32，与头里的比。
-     *    对不上就直接返回，**绝不擦内部 flash**：擦掉能跑的旧固件又搬不进新固件
+     *    对不上就直接返回，**绝不擦内部 flash**：擦掉能跑的镜像又搬不进新镜像
      *    就是变砖。这一步只读 NOR（SPI 位操作在 RAM 里），中断照常开着。 */
     crc_want = (uint32_t)hdr[10] | ((uint32_t)hdr[11] << 8) |
                ((uint32_t)hdr[12] << 16) | ((uint32_t)hdr[13] << 24);
