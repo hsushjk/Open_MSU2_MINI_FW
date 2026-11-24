@@ -422,10 +422,16 @@ int usb_read(uint8_t *dst, int max)
         dst[n++] = rx_ring[rx_tail];
         rx_tail = (uint16_t)((rx_tail + 1u) & (RX_RING_SIZE - 1u));
     }
-    if (ep2_nak) {
+    /* 环里有空间就无条件把 OUT 端点置回 ACK。
+     * NAK 只在 ISR 里“这一包放不下”时置位；一旦它因为任何原因留在 NAK
+     * （例如主机写过超时之后），主机之后每次写都会等到超时，表现为
+     * “设备还在打招呼、却再也不回任何命令”。这里每圈都检查，保证
+     * 只要位置够就必定可写。 */
+    {
         uint16_t used = (uint16_t)((rx_head - rx_tail) & (RX_RING_SIZE - 1u));
         uint16_t free_bytes = (uint16_t)(RX_RING_SIZE - used);
-        if (free_bytes >= 2048u) {
+
+        if (free_bytes >= 2048u && ((uint16_t)UEP2_H & 0x03u) != 0x00u) {
             ep2_nak = 0u;
             UEP2_H = (uint8_t)(UEP2_H & 0xfcu);              /* ACK */
         }
