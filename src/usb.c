@@ -425,15 +425,13 @@ void usb_service(void)
                 rx_ring[rx_head] = ((volatile const uint8_t *)ep2_buf)[k];
                 rx_head = (uint16_t)((rx_head + 1u) & (RX_RING_SIZE - 1u));
             }
-            used = (uint16_t)((rx_head - rx_tail) & (RX_RING_SIZE - 1u));
-            free_bytes = (uint16_t)(RX_RING_SIZE - used);
-            if (free_bytes < 2048u) {
-                /* 剩余空间不够两包，先 NAK，等主循环腾出空间再放行 */
-                ep2_nak = 1u;
-                UEP2_H = (uint8_t)((UEP2_H & 0xfcu) | 0x02u);
-            } else {
-                UEP2_H = (uint8_t)(UEP2_H & 0xfcu);          /* ACK */
-            }
+            /* 只要这一包（<=64 B）放得下就 ACK，不再"余量不足 2 KB 就提前 NAK"：
+             * 提前 NAK 会让主机的 OUT URB 部分完成（usbmon 实测 1280 B 只完成
+             * 768 B），Linux 的 cdc_acm 为此要退避几百毫秒。不过余量节流并不是
+             * 整帧慢的主因（真凶在主机写路径，见 msu2_core/transport.py 的非阻塞
+             * 写）。所以这里只简化策略：这一包真放不下（free < 64，上面已处理）
+             * 才 NAK，字节留在主机侧，不丢数据。 */
+            UEP2_H = (uint8_t)(UEP2_H & 0xfcu);            /* ACK */
         }
     } else {
         /* EP0 状态阶段：只清长度 */

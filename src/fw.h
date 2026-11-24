@@ -14,6 +14,8 @@ void spi_flush(void);
 /* ---- 时钟 / 面板 ---- */
 void board_clock_init(void);
 void lcd_gpio_init(void);
+extern volatile uint16_t g_dma_to;
+
 void lcd_init(void);
 void lcd_command(uint8_t cmd);
 void lcd_data8(uint8_t value);
@@ -130,8 +132,10 @@ extern volatile uint32_t usb_req_count;
 extern volatile uint32_t usb_irq_count;
 extern volatile uint32_t usb_setup_count;
 extern volatile uint32_t usb_suspend_count;
+extern volatile uint32_t g_loop_count;
 extern volatile uint32_t usb_in_count;
 extern volatile uint32_t usb_out_count;
+extern volatile uint32_t usb_rx_stall;
 extern volatile uint16_t usb_last_len;
 extern volatile uint8_t  usb_last_b0;
 extern volatile uint8_t  usb_last_b1;
@@ -153,7 +157,7 @@ extern uint8_t  cfg_selected;
 #define FW_VER_MINOR  0u
 #endif
 #ifndef FW_VER_PATCH
-#define FW_VER_PATCH  9u
+#define FW_VER_PATCH  13u
 #endif
 
 #endif /* FW_H */

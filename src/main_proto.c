@@ -688,6 +688,7 @@ static void rle_feed(uint8_t b)
 }
 static uint32_t t_frame_start;
 static volatile uint16_t last_frame_ms;
+volatile uint32_t g_loop_count;
 
 static uint32_t systick_now(void)
 {
@@ -996,6 +997,42 @@ static void handle_frame(const uint8_t *f)
                 b[6u + i] = *(volatile uint8_t *)(0x08000000u + i);
             b[22] = 0xAAu;
             usb_write(b, 23);
+            return;
+        }
+        if (sub == 0x1Bu) {                    /* 诊断⑤：主循环圈数/USB OUT 包数/NAK 次数
+                                                * [0A,1B,loop(4),out(2),nak(2)]；
+                                                * f[2]==1 清零 loop 计数器 */
+            uint8_t b[10];
+
+            if (f[2] == 1u)
+                g_loop_count = 0u;
+            b[0] = 0x0Au;
+            b[1] = 0x1Bu;
+            b[2] = (uint8_t)(g_loop_count >> 24);
+            b[3] = (uint8_t)((g_loop_count >> 16) & 0xFFu);
+            b[4] = (uint8_t)((g_loop_count >> 8) & 0xFFu);
+            b[5] = (uint8_t)(g_loop_count & 0xFFu);
+            b[6] = (uint8_t)((usb_out_count >> 8) & 0xFFu);
+            b[7] = (uint8_t)(usb_out_count & 0xFFu);
+            b[8] = (uint8_t)((usb_rx_stall >> 8) & 0xFFu);
+            b[9] = (uint8_t)(usb_rx_stall & 0xFFu);
+            usb_write(b, 10);
+            return;
+        }
+        if (sub == 0x1Au) {                    /* 诊断④：上一帧设备侧耗时 + DMA 超时
+                                                * [0A,1A,ms_hi,ms_lo,to_hi,to_lo]；
+                                                * f[2]==1 时先清零计数器 */
+            uint8_t b[6];
+
+            if (f[2] == 1u)
+                g_dma_to = 0u;
+            b[0] = 0x0Au;
+            b[1] = 0x1Au;
+            b[2] = (uint8_t)(last_frame_ms >> 8);
+            b[3] = (uint8_t)(last_frame_ms & 0xFFu);
+            b[4] = (uint8_t)(g_dma_to >> 8);
+            b[5] = (uint8_t)(g_dma_to & 0xFFu);
+            usb_write(b, 6);
             return;
         }
         if (sub == 0x16u) {                    /* 诊断②：连跑 N 步待机动画并回报节拍
@@ -1457,6 +1494,7 @@ int main(void)
     iwdg_start();
 
     for (;;) {
+        g_loop_count++;
         iwdg_feed();
         TRACE_STAGE(4u);
         int n;
@@ -1488,7 +1526,11 @@ int main(void)
         /* 原始像素流中途断掉时放弃本段：否则剩下的字会被当成像素，
          * 之后的帧头全部错位，表现为画面冻结且切插件也无法恢复。 */
         if (raw_left > 0u && rx_len == 0) {
-            if (++stall > 4000u) {
+            /* 400000 圈：主机按 2 KB 分块限速发送，块间可能有十几毫秒空档，
+             * 旧值 4000 圈（几毫秒）在 Linux 的成串 USB 传输下会误判成断流，
+             * 一帧中途作废就缺块（实测 Linux 整帧报 30/50 块坏）。
+             * 真断流时多等几百毫秒也无妨。 */
+            if (++stall > 400000u) {
                 raw_left = 0u;
                 stage_len = 0u;
                 rle_n = 0u;

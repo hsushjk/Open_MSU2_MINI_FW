@@ -123,6 +123,8 @@ static void spi_dma_setup(void)
     DMA1_CH3->CFGR = DMA_CFGR_DIR | DMA_CFGR_MINC;
 }
 
+volatile uint16_t g_dma_to;
+
 static int dma_wait_done(uint32_t len)
 {
     uint32_t guard = len * 200u + 100000u;
@@ -130,6 +132,7 @@ static int dma_wait_done(uint32_t len)
         if (--guard == 0u) {
             DMA1_CH3->CFGR &= ~DMA_CFGR_EN;
             DMA1->INTFCR = DMA_TCIF3;
+            g_dma_to++;
             return 0;
         }
     }
