@@ -50,6 +50,7 @@ static uint16_t sig_left;
 static uint8_t  sig_pos;
 static uint8_t  sig_rx;
 static uint8_t  up_rx_on;
+static uint8_t  up_committed;                 /* 本次上电已提交镜像（0A 13 回 06） */
 static uint16_t up_rx_left;
 static uint32_t up_idle;                 /* iterations spent waiting for upload data */
 static uint32_t stream_bytes;
@@ -900,6 +901,8 @@ static void handle_frame(const uint8_t *f)
                        ((uint32_t)f[4] << 8) | (uint32_t)f[5];
         uint8_t ok = (uint8_t)(update_stage_commit(crc) ? 0x06u : 0x15u);
 
+        if (ok == 0x06u) { up_committed = 1u; } else { up_committed = 0u; }
+
         up_rx_on = 0u;
         rr[0] = 0x13u; rr[1] = 0x00u; rr[2] = ok;
         rr[3] = 0u; rr[4] = 0u; rr[5] = 0u;
@@ -908,6 +911,20 @@ static void handle_frame(const uint8_t *f)
     }
     if (cls == 0x14u) {                       /* 自更新：就地搬运并复位（摊运在 RAM） */
         uint8_t rr[6];
+
+        /* 危险命令：会擦内部 flash。必须同时满足
+           ① 帧里带确认令牌 A5 5A；
+           ② 本次上电先成功提交过镜像（0A 13 回 06）；
+           ③ 当前不在收流途中（raw_left/up_rx/资产/签名都要空）。
+           这样即使流错位、像素字节被误当命令，也不可能凑出一次擦写。 */
+        if (f[2] != 0xA5u || f[3] != 0x5Au || up_committed == 0u ||
+            raw_left > 0u || up_rx_on != 0u || asset_rx != 0u || sig_rx != 0u) {
+            rr[0] = 0x14u; rr[1] = 0x00u; rr[2] = 0x15u;
+            rr[3] = 0xFEu; rr[4] = 0u; rr[5] = 0u;
+            usb_write(rr, 6);
+            return;
+        }
+        up_committed = 0u;
 
         update_set_apply_flag();
         rr[0] = 0x14u; rr[1] = 0x00u; rr[2] = 0x06u;
