@@ -391,18 +391,39 @@ static uint8_t next_valid_slot(uint8_t from)
     return 0xFFu;
 }
 
-/* ---------- 待机图片交叉淡入淡出 ----------
+/* ---------- 待机图片交叉淡入淡出（非阻塞状态机） ----------
  * 这块板上没有帧缓存，所以是"边读边混边推"：一条 2 行带子（640 字节）
- * 从 NOR 各读一份，按权重混合后整条推给屏。8 级权重用 >>3 完成，
- * SPI 24 MHz 下整屏一次过渡约 170 ms（8 步）。
+ * 从 NOR 各读一份，按权重混合后整条推给屏，8 级权重用 >>3 完成。
  * 注意：读 flash 时必须让屏 CS 保持高（PA6 一脚两用），所以每条带子
  * 都是"先读、再开窗、再推、再抬 CS"，跟 asset_draw 一样。
- * fmt=1（RLE）的图也走同样的 2 行带子：用 assets.c 的 asset_fade_band()
- * 流式解出带子再混，解码游标跨带子保留，内存占用与 fmt=0 相同。 */
+ *
+ * v1.0.5 及以前这里是一次调用里的同步双重循环（8 档权重 × 40 条带子），
+ * 实测 2652–3333 ms 期间主循环完全停摆：上位机正好在这时推帧的话，设备
+ * 接收环被 NAK 塞死，主机 write 超时（写入失败: Write timeout），随后只能
+ * 靠重连+握手恢复。现在拆成三件小事：
+ *   standby_fade()      只校验 + 打开两条 lane + 记下目标，立即返回；
+ *   standby_fade_step() 主循环每圈调用一次，只解 1 条带子（640 B = 2 行）；
+ *   fade_step/fade_band 记进度，40 条带子换一档权重，8 档走完收尾。
+ * 末档权重 (0, 8) 推上去的就是 to 的完整内容，不用再整幅补画一遍。
+ * 一条带子约 3–10 ms，推完就回主循环，所以淡入全程任何时刻都能在 ~10 ms
+ * 内处理下一条命令（USB 服务不会饿死）。
+ *
+ * 两条 lane 都走 assets.c 的 asset_fade_open/asset_fade_band：fmt=0（裸
+ * RGB565）和 fmt=1（RLE）共用同一条带子路径——fmt=0 时 lane 里的 addr 正好
+ * 是 asset_data_addr()，输出字节和以前的老路径一模一样；黑场（from = 0xFF）
+ * 当一路虚拟帧（lane 里 fmt=2 填 0）。槽头格式只在 standby_fade() 里读一次。
+ * 主循环那边：fade_active 还在就不再累计 standby_wait，轮播计时不会和淡入
+ * 叠加；主机来帧/贴图把 standby_mode 清 0 时静默放弃剩下的带子。 */
 #define FADE_STEPS 8u
+#define FADE_BANDS 40u                  /* 80 行 / 每条带子 2 行 */
 
 static uint8_t fade_a[640];
 static uint8_t fade_b[640];
+static uint8_t fade_active;             /* 1 = 淡入进行中，主循环每圈推一条带子 */
+static uint8_t fade_step;               /* 0..FADE_STEPS-1：当前权重档 */
+static uint8_t fade_band;               /* 0..FADE_BANDS-1：当前带子 */
+static uint8_t fade_from;               /* 淡出端槽号，0xFF = 黑场 */
+static uint8_t fade_to;                 /* 淡入端槽号 */
 
 static void fade_rows(const uint8_t *a, const uint8_t *b, uint32_t wa, uint32_t wb)
 {
@@ -421,19 +442,16 @@ static void fade_rows(const uint8_t *a, const uint8_t *b, uint32_t wa, uint32_t 
     }
 }
 
-/* 交叉淡入：两张图逐带子（2 行 = 640 B）混色推屏。
- * fmt=0 两路都直接按裸 RGB565 地址读 flash（老路径，一个字节没变）；
- * 任一张是 fmt=1 时改走 asset_fade_open/asset_fade_band——每路各解出 2 行，
- * RLE 解码游标跨带子保留（整步只初始化一次，不是每带子从头解整图），
- * 黑场也当成一路虚拟帧。内存增量只有两套解码游标（< 200 B），
- * fade_a/fade_b 这两条 640 B 带子沿用原来的。
- * from = 0xFF 表示从黑场淡入。 */
+/* 交叉淡入的初始化：只做校验、打开两条 lane、记下目标，立刻返回。
+ * 320 条带子交给主循环一圈一条慢慢推（standby_fade_step）。
+ * from = 0xFF 表示从黑场淡入（lane 里就是一路全 0 的虚拟帧）。 */
 static void standby_fade(uint8_t from, uint8_t to)
 {
-    uint8_t step;
     uint8_t fmt_a;
     uint8_t fmt_b;
 
+    fade_active = 0u;               /* 上一次没走完就又要切换：直接丢弃旧进度 */
+    lcd_raw_idle();                 /* 下面要读槽头（PA6 一脚两用），先抬高屏 CS */
     if (!asset_valid(ASSET_STANDBY, to))
         return;
     fmt_a = (from == 0xFFu) ? 0u : asset_format(ASSET_STANDBY, from);
@@ -442,62 +460,61 @@ static void standby_fade(uint8_t from, uint8_t to)
         (void)asset_draw(ASSET_STANDBY, to);
         return;
     }
+    fade_from = from;
+    fade_to = to;
+    fade_step = 0u;
+    fade_band = 0u;
+    asset_fade_open(0u, ASSET_STANDBY, from, (uint8_t)(from == 0xFFu));
+    asset_fade_open(1u, ASSET_STANDBY, to, 0u);
+    fade_active = 1u;
+}
 
-    TRACE_STAGE(7u);
-    if (fmt_a == 0u && fmt_b == 0u) {   /* 老路径：整幅裸 RGB565 */
-        uint32_t a_base = (from == 0xFFu) ? 0u : asset_data_addr(ASSET_STANDBY, from);
-        uint32_t b_base = asset_data_addr(ASSET_STANDBY, to);
+/* 推一条带子（640 B，混色 + 推屏 ≈ 3–10 ms）就返回，主循环靠它把整段淡入
+ * 摊到 320 圈里。带子读完一条就 lcd_raw_idle()，既满足"读 NOR 前屏 CS 必须
+ * 高"，也让下一次主循环能先处理 USB。每推一条喂一次 IWDG。 */
+static void standby_fade_step(void)
+{
+    uint32_t wa;
+    uint32_t wb;
+    int y;
 
-        for (step = 1u; step <= FADE_STEPS; step++) {
-            uint32_t wa = (uint32_t)(FADE_STEPS - step);
-            uint32_t wb = (uint32_t)step;
-            uint32_t ao = a_base;
-            uint32_t bo = b_base;
-            int y;
-
-            for (y = 0; y < 80; y += 2) {
-                int i;
-
-                if (from == 0xFFu) {
-                    for (i = 0; i < 640; i++)
-                        fade_a[i] = 0u;                 /* 黑场 */
-                } else {
-                    flash_read(ao, fade_a, 640);
-                    ao += 640u;
-                }
-                flash_read(bo, fade_b, 640);
-                bo += 640u;
-                fade_rows(fade_a, fade_b, wa, wb);
-                lcd_stream_begin(0, y, 160, y + 2);
-                lcd_raw_write(fade_a, 640);
-                lcd_raw_idle();
-            }
-            iwdg_feed();
-        }
+    if (!fade_active)
+        return;
+    TRACE_STAGE(7u);                /* 看门狗复位后 0A 0D 能看出死在淡入里 */
+    wa = (uint32_t)(FADE_STEPS - (fade_step + 1u));
+    wb = (uint32_t)(fade_step + 1u);
+    y = (int)fade_band * 2;
+    if (!asset_fade_band(0u, fade_a) || !asset_fade_band(1u, fade_b)) {
+        /* 槽数据坏了：已经推出去的半幅收不回来，整幅重画成 to */
+        fade_active = 0u;
+        (void)asset_draw(ASSET_STANDBY, fade_to);
         return;
     }
+    fade_rows(fade_a, fade_b, wa, wb);
+    lcd_stream_begin(0, y, 160, y + 2);
+    lcd_raw_write(fade_a, 640);
+    lcd_raw_idle();
+    iwdg_feed();                    /* 单带 3–10 ms，远短于 IWDG 周期 */
 
-    /* fmt=1 路径：一行一行带地“解 from 2 行 + 解 to 2 行 + 混色”。 */
-    for (step = 1u; step <= FADE_STEPS; step++) {
-        uint32_t wa = (uint32_t)(FADE_STEPS - step);
-        uint32_t wb = (uint32_t)step;
-        int y;
+    if (++fade_band < FADE_BANDS)
+        return;
+    fade_band = 0u;
+    if (++fade_step < FADE_STEPS) {
+        /* 下一档权重又要从第 0 行解起：两条 lane 都回到槽头（老代码每步重开） */
+        asset_fade_open(0u, ASSET_STANDBY, fade_from, (uint8_t)(fade_from == 0xFFu));
+        asset_fade_open(1u, ASSET_STANDBY, fade_to, 0u);
+        return;
+    }
+    fade_active = 0u;               /* 末档权重 (0,8)：屏上已经是 to 的整幅内容 */
+}
 
-        /* 每一步都从两张图的第一行开始，但一次 open 之后整幅 80 行
-         * 是顺着解下去的：RLE 状态在带子之间连续，不会重复解压。 */
-        asset_fade_open(0u, ASSET_STANDBY, from, (uint8_t)(from == 0xFFu));
-        asset_fade_open(1u, ASSET_STANDBY, to, 0u);
-        for (y = 0; y < 80; y += 2) {
-            if (!asset_fade_band(0u, fade_a) || !asset_fade_band(1u, fade_b)) {
-                /* 槽数据坏了：已经推出去的半幅收不回来，整幅重画成 to */
-                (void)asset_draw(ASSET_STANDBY, to);
-                return;
-            }
-            fade_rows(fade_a, fade_b, wa, wb);
-            lcd_stream_begin(0, y, 160, y + 2);
-            lcd_raw_write(fade_a, 640);
-            lcd_raw_idle();
-        }
+/* 诊断命令（0A 10 / 0A 16）要"整段淡入跑完再回包"：上位机拿它们的往返耗时
+ * 测淡入总时长，所以这里就地把剩下的带子推完（约 1–3 秒，中途喂狗）。
+ * 主循环那条非阻塞路径不受影响，两条路径用的是同一个 standby_fade_step。 */
+static void fade_run_sync(void)
+{
+    while (fade_active) {
+        standby_fade_step();
         iwdg_feed();
     }
 }
@@ -987,8 +1004,11 @@ static void handle_frame(const uint8_t *f)
             if (cad > 0xFFFFu)
                 cad = 0xFFFFu;
 
+            /* 淡入改成主循环非阻塞推进后，这里同步把每一拍的淡入跑完，
+             * 否则回包只要几毫秒，也测不到整段过渡的真实时长。 */
             for (k = 0u; k < steps; k++) {
                 standby_tick();
+                fade_run_sync();
                 iwdg_feed();
             }
             r[0] = 0x0Au; r[1] = 0x16u; r[2] = 0x06u;
@@ -1200,6 +1220,7 @@ static void handle_frame(const uint8_t *f)
                 n = 40u;
             for (i = 0u; i < n; i++) {
                 standby_tick();
+                fade_run_sync();          /* 诊断路径：整段淡入跑完再回包 */
                 iwdg_feed();
             }
             r[0] = 0x0Au; r[1] = 0x10u; r[2] = 0x06u;
@@ -1496,12 +1517,24 @@ int main(void)
          * 主循环每转一圈给 standby_wait 加一拍，攒够 STANDBY_BLINK_TICKS
          * （≈1 秒）才翻色/换图，全程不阻塞；这一圈收到字节就跳过，和原来
          * “rx_len == 0 才 tick”的行为一致。 */
+        /* 非阻塞交叉淡入：这一圈只推一条 2 行带子（640 B）就回主循环，
+         * 所以淡入期间 USB 每 3–10 ms 就被服务一次，不会再出现写超时。 */
+        if (fade_active) {
+            if (standby_mode == 0u) {
+                /* 主机来帧/贴图把待机关了：静默放弃剩下的带子。这里不能动
+                 * lcd CS（流式画面正开着窗口），band 收尾时它已经是高的。 */
+                fade_active = 0u;
+            } else {
+                standby_fade_step();
+            }
+        }
+
         if (standby_mode) {
             if (blink_first) {
                 blink_first = 0u;
                 standby_wait = 0u;
-                standby_draw();
-            } else if (rx_len == 0) {
+                standby_draw();          /* 图片模式会在这里起一次淡入，立即返回 */
+            } else if (!fade_active && rx_len == 0) {   /* 淡入没走完不计轮播拍数 */
                 uint32_t need = STANDBY_BLINK_TICKS;
 
                 /* 图片轮播按设置的“每张停留秒数”，方块轮播固定 1 秒，
