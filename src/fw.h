@@ -54,6 +54,7 @@ void update_set_apply_flag(void);
 void update_clear_apply_flag(void);
 int  update_pending(void);
 int  update_apply(void);
+int  update_probe(void);
 extern volatile uint8_t g_up_result;   /* last update result: 0 ok, 1..4 failure stage */
 
 /* ---- CRC32（逐位实现，不查表，省 flash） ---- */
@@ -130,7 +131,7 @@ extern uint16_t usb_tx_len;
 extern uint8_t  cfg_selected;
 
 #ifndef FW_VER_MAJOR
-#define FW_VER_MAJOR  77u
+#define FW_VER_MAJOR  81u
 #endif
 #ifndef FW_VER_MINOR
 #define FW_VER_MINOR  0u

@@ -696,19 +696,22 @@ static void handle_frame(const uint8_t *f)
         usb_write(rr, 6);
         return;
     }
-    if (cls == 0x14u) {                       /* 自更新：置“请更新”并立即擦写内部 flash */
+    if (cls == 0x14u) {                       /* 自更新：就地搬运并复位（摊运在 RAM） */
         uint8_t rr[6];
 
         update_set_apply_flag();
         rr[0] = 0x14u; rr[1] = 0x00u; rr[2] = 0x06u;
         rr[3] = 0u; rr[4] = 0u; rr[5] = 0u;
         usb_write(rr, 6);
-        delay_ms(60);
-        /* v77 起由 0x0000 的常驻引导负责搬运：这里只写标志然后复位，
-           应用自己的代码永远不会覆盖 0x0000-0x0FFF，所以不可能把自己写死。 */
-        *(volatile uint32_t *)0xE000ED0Cu = 0x05FA0004u;
-        for (;;)
-            ;
+        delay_ms(80);
+        /* update_apply() 全身在 RAM：先体检 0x7000 页，体检不过就直接返回，
+           内部 flash 一点没动；体检过了才关中断、擦应用区、逐页搬、再复位。 */
+        (void)update_apply();
+        /* 能走到这里说明搬运失败（否则已经复位） */
+        update_clear_apply_flag();
+        rr[0] = 0x14u; rr[1] = 0x00u; rr[2] = 0x15u;
+        rr[3] = g_up_result; rr[4] = 0u; rr[5] = 0u;
+        usb_write(rr, 6);
         return;
     }
 
@@ -742,6 +745,22 @@ static void handle_frame(const uint8_t *f)
             r[2] = g_boot_report;
             r[3] = 0u; r[4] = 0u; r[5] = 0u;
             usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x23u) {                    /* 内部 flash 写序列体检（擦+写+读回 0x7000） */
+            uint8_t code = (uint8_t)(update_probe() == 0 ? 0x06u : 0x15u);
+            r[0] = 0x0Au; r[1] = 0x23u; r[2] = code;
+            r[3] = (uint8_t)g_up_result; r[4] = 0u; r[5] = 0u;
+            usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x24u) {                    /* 读回 0x7000 的 8 字节 */
+            uint32_t i;
+            r[0] = 0x0Au; r[1] = 0x24u; r[2] = 8u;
+            for (i = 0u; i < 8u; i++)
+                r[3 + i] = *(volatile uint8_t *)(0x08000000u + 0x7000u + i);
+            r[11] = 0xAAu;
+            usb_write(r, 12);
             return;
         }
         if (sub == 0x12u) {                    /* 免拆自更新：begin（01）/ 一窗数据（02） */

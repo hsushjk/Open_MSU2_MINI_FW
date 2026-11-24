@@ -52,22 +52,6 @@ reset_entry:
     addi    t1, t1, 4
     j       3b
 
-    /* 常驻引导（0x0000）转发中断：把我们的处理函数地址填进 RAM 表 0x20004000
-       （第 1..63 项；第 0 项是复位入口，用不到）。 */
-4:  la      t1, _vectors
-    li      t2, 0x20004000
-    li      t3, 1
-5:  slli    t4, t3, 2
-    add     t4, t1, t4
-    lw      t5, 0(t4)
-    li      t4, 0x20004000
-    slli    t6, t3, 2
-    add     t4, t4, t6
-    sw      t5, 0(t4)
-    addi    t3, t3, 1
-    li      t6, 64
-    blt     t3, t6, 5b
-
     /* mstatus = 0x88：MIE=1，开总中断 */
 4:
 #ifndef STARTUP_NO_CSR

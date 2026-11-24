@@ -381,3 +381,38 @@ int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
     ram_reset();
     return 0;
 }
+
+/* 体检：擦一页 0x7000、写 8 字节、读回比对。只用于验证写序列，不碰应用区。 */
+int update_probe(void)
+{
+    uint8_t want[8];
+    uint32_t i;
+
+    for (i = 0u; i < 8u; i++)
+        want[i] = (uint8_t)(0xA0u + i);
+
+    ram_unlock();
+    ram_erase_page(IFLASH_ALIAS + IFLASH_PROBE_ADDR);
+    for (i = 0u; i < 8u; i++) {
+        if (*(volatile uint8_t *)(IFLASH_ALIAS + IFLASH_PROBE_ADDR + i) != 0xFFu) {
+            ram_lock();
+            return 1;
+        }
+    }
+    {
+        uint8_t buf[256];
+        for (i = 0u; i < 256u; i++)
+            buf[i] = 0xFFu;
+        for (i = 0u; i < 8u; i++)
+            buf[i] = want[i];
+        ram_program_page(IFLASH_ALIAS + IFLASH_PROBE_ADDR, buf);
+    }
+    for (i = 0u; i < 8u; i++) {
+        if (*(volatile uint8_t *)(IFLASH_ALIAS + IFLASH_PROBE_ADDR + i) != want[i]) {
+            ram_lock();
+            return 2;
+        }
+    }
+    ram_lock();
+    return 0;
+}
