@@ -1,7 +1,7 @@
 /* 协议固件（-Variant proto）
  *
  * 6 字节帧：[class, sub, b2, b3, b4, b5]
- *   class 0  sub 0x4D         握手（设备发 MSN02，主机回 MSNCN）
+ *   class 0  sub 0x4D         握手（设备发 OPMSU，主机回 OKMSU）
  *   class 2  sub 0            x0, y0
  *   class 2  sub 1            x1, y1（终点，不是宽高）
  *   class 2  sub 3  op 0      纯色填充   colour = b3:b4
@@ -72,6 +72,18 @@ static uint32_t win_px;   /* 当前流的窗口像素数，用于整帧角标判
  * 几毫秒，够用；主机崩了也能在几百毫秒内恢复，而不是原来 4 000 000 圈
  * （≈ 1 小时）。注意别照抄“200000 圈”，那在这个循环里等于 200 秒。 */
 #define UP_IDLE_LIMIT       400u
+
+/* 半帧/残包自愈：6 字节定界只要错位 1..5 字节就永远补不齐，表现为“设备还在
+ * 打招呼、但所有命令都不应”，只能拔插。完全空闲（没有 raw_left / 资产 / OTA /
+ * 签名收流）时若手上还留着 1..5 字节，且已经 100 ms 没有新字节，就整段丢掉；
+ * 下一帧从干净边界重新对齐。计时用 SysTick（48000 计数 ≈ 1 ms）。
+ * 注意：收流中途绝不跑这个判断——半帧停顿 100 ms 在直连 USB 上不会出现。 */
+#define RX_IDLE_FLUSH_MS    100u
+
+/* 空闲时连续收到这么多个 0x00 一律当主机垫的对齐填充丢掉：6 字节帧最多
+ * 5 个前导 0，而 class 0 sub 0 本身就是空帧，所以丢它一定安全。
+ * 只在完全空闲时做，收流（像素/资产/OTA/签名）途中不动。 */
+#define RX_PAD_RUN          8
 
 static settings_t g_settings;     /* NOR 里的设置：开机/待机模式 */
 uint8_t g_boot_report;            /* 开机自检结果位图：bit0 FLASH / bit1 TOUCH / bit2 LCD / bit3 USB / bit4 SETTINGS */
@@ -384,7 +396,9 @@ static uint8_t next_valid_slot(uint8_t from)
  * 从 NOR 各读一份，按权重混合后整条推给屏。8 级权重用 >>3 完成，
  * SPI 24 MHz 下整屏一次过渡约 170 ms（8 步）。
  * 注意：读 flash 时必须让屏 CS 保持高（PA6 一脚两用），所以每条带子
- * 都是"先读、再开窗、再推、再抬 CS"，跟 asset_draw 一样。 */
+ * 都是"先读、再开窗、再推、再抬 CS"，跟 asset_draw 一样。
+ * fmt=1（RLE）的图也走同样的 2 行带子：用 assets.c 的 asset_fade_band()
+ * 流式解出带子再混，解码游标跨带子保留，内存占用与 fmt=0 相同。 */
 #define FADE_STEPS 8u
 
 static uint8_t fade_a[640];
@@ -407,45 +421,78 @@ static void fade_rows(const uint8_t *a, const uint8_t *b, uint32_t wa, uint32_t 
     }
 }
 
-/* from = 0xFF 表示从黑场淡入 */
+/* 交叉淡入：两张图逐带子（2 行 = 640 B）混色推屏。
+ * fmt=0 两路都直接按裸 RGB565 地址读 flash（老路径，一个字节没变）；
+ * 任一张是 fmt=1 时改走 asset_fade_open/asset_fade_band——每路各解出 2 行，
+ * RLE 解码游标跨带子保留（整步只初始化一次，不是每带子从头解整图），
+ * 黑场也当成一路虚拟帧。内存增量只有两套解码游标（< 200 B），
+ * fade_a/fade_b 这两条 640 B 带子沿用原来的。
+ * from = 0xFF 表示从黑场淡入。 */
 static void standby_fade(uint8_t from, uint8_t to)
 {
     uint8_t step;
-    int y;
-    uint32_t a_base;
-    uint32_t b_base;
+    uint8_t fmt_a;
+    uint8_t fmt_b;
 
     if (!asset_valid(ASSET_STANDBY, to))
         return;
-    /* 淡入淡出是直接按裸 RGB565 的地址读带子的；遇到 fmt=1（RLE）就退回
-     * 直接整幅画：宁可少一次渐变，也不能把压缩字节当像素读。 */
-    if (asset_format(ASSET_STANDBY, to) != 0u ||
-        (from != 0xFFu && asset_format(ASSET_STANDBY, from) != 0u)) {
+    fmt_a = (from == 0xFFu) ? 0u : asset_format(ASSET_STANDBY, from);
+    fmt_b = asset_format(ASSET_STANDBY, to);
+    if (fmt_a > 1u || fmt_b > 1u) {     /* 槽头不合法：别把压缩字节当像素读 */
         (void)asset_draw(ASSET_STANDBY, to);
         return;
     }
-    a_base = (from == 0xFFu) ? 0u : asset_data_addr(ASSET_STANDBY, from);
-    b_base = asset_data_addr(ASSET_STANDBY, to);
 
     TRACE_STAGE(7u);
+    if (fmt_a == 0u && fmt_b == 0u) {   /* 老路径：整幅裸 RGB565 */
+        uint32_t a_base = (from == 0xFFu) ? 0u : asset_data_addr(ASSET_STANDBY, from);
+        uint32_t b_base = asset_data_addr(ASSET_STANDBY, to);
+
+        for (step = 1u; step <= FADE_STEPS; step++) {
+            uint32_t wa = (uint32_t)(FADE_STEPS - step);
+            uint32_t wb = (uint32_t)step;
+            uint32_t ao = a_base;
+            uint32_t bo = b_base;
+            int y;
+
+            for (y = 0; y < 80; y += 2) {
+                int i;
+
+                if (from == 0xFFu) {
+                    for (i = 0; i < 640; i++)
+                        fade_a[i] = 0u;                 /* 黑场 */
+                } else {
+                    flash_read(ao, fade_a, 640);
+                    ao += 640u;
+                }
+                flash_read(bo, fade_b, 640);
+                bo += 640u;
+                fade_rows(fade_a, fade_b, wa, wb);
+                lcd_stream_begin(0, y, 160, y + 2);
+                lcd_raw_write(fade_a, 640);
+                lcd_raw_idle();
+            }
+            iwdg_feed();
+        }
+        return;
+    }
+
+    /* fmt=1 路径：一行一行带地“解 from 2 行 + 解 to 2 行 + 混色”。 */
     for (step = 1u; step <= FADE_STEPS; step++) {
         uint32_t wa = (uint32_t)(FADE_STEPS - step);
         uint32_t wb = (uint32_t)step;
-        uint32_t ao = a_base;
-        uint32_t bo = b_base;
+        int y;
 
+        /* 每一步都从两张图的第一行开始，但一次 open 之后整幅 80 行
+         * 是顺着解下去的：RLE 状态在带子之间连续，不会重复解压。 */
+        asset_fade_open(0u, ASSET_STANDBY, from, (uint8_t)(from == 0xFFu));
+        asset_fade_open(1u, ASSET_STANDBY, to, 0u);
         for (y = 0; y < 80; y += 2) {
-            int i;
-
-            if (from == 0xFFu) {
-                for (i = 0; i < 640; i++)
-                    fade_a[i] = 0u;                 /* 黑场 */
-            } else {
-                flash_read(ao, fade_a, 640);
-                ao += 640u;
+            if (!asset_fade_band(0u, fade_a) || !asset_fade_band(1u, fade_b)) {
+                /* 槽数据坏了：已经推出去的半幅收不回来，整幅重画成 to */
+                (void)asset_draw(ASSET_STANDBY, to);
+                return;
             }
-            flash_read(bo, fade_b, 640);
-            bo += 640u;
             fade_rows(fade_a, fade_b, wa, wb);
             lcd_stream_begin(0, y, 160, y + 2);
             lcd_raw_write(fade_a, 640);
@@ -632,7 +679,9 @@ static volatile uint32_t frame_done;
 static int x0, y0, x1, y1;
 static int connected;
 
-static const uint8_t hello[6] = { 0x00, 0x4D, 0x53, 0x4E, 0x30, 0x32 };
+/* 自研握手串：\0OPMSU。主机看到它回 \0OKMSU；版本号不再编进握手，
+ * 只从 class 0 sub 0x56 的版本帧取（老主机仍按 \0MSN 兼容路走）。 */
+static const uint8_t hello[6] = { 0x00, 0x4F, 0x50, 0x4D, 0x53, 0x55 };
 static uint32_t hb_hold;		/* >0：暂缓心跳，给应答包让路 */
 
 static void seg_fill4(const uint8_t *p)
@@ -1264,6 +1313,8 @@ static void iwdg_feed(void)
 int main(void)
 {
     int rx_len = 0;
+    uint32_t rx_last_tick;      /* 上次收到字节的 SysTick 时刻（判半帧残留） */
+    uint8_t  rx_reset_seen;     /* 已经处理到的 USB 复位计数 */
     uint8_t rst = reset_cause_read();   /* 必须在 iwdg_start() 之前、且只读一次 */
 
     trace_boot(rst);
@@ -1340,6 +1391,8 @@ int main(void)
         uint32_t a, b, d;
         uint8_t c[6];
         systick_init();
+        rx_last_tick = systick_now();
+        rx_reset_seen = (uint8_t)usb_reset_count;
         a = systick_now();
         delay_ms(10);
         b = systick_now();
@@ -1363,11 +1416,21 @@ int main(void)
         static uint32_t hello_tick;
         static uint32_t stall;
 
+        /* 主机重新打开串口会触发 USB 复位：把上个会话的残包清掉。老固件从不清
+         * rx_ring，关端口时发了一半的命令会一直留在设备里，之后 6 字节定界
+         * 永久错位（实测只能拔插）。复位后主机必定重新握手，丢掉是安全的。 */
+        if (usb_reset_count != rx_reset_seen) {
+            rx_reset_seen = (uint8_t)usb_reset_count;
+            rx_len = 0;
+            rx_last_tick = systick_now();
+        }
+
         while (rx_len < (int)sizeof(rx)) {
             n = usb_read(rx + rx_len, (int)sizeof(rx) - rx_len);
             if (n <= 0)
                 break;
             rx_len += n;
+            rx_last_tick = systick_now();
             quiet = 0u;
             hello_tick = 0u;
             stall = 0u;
@@ -1383,6 +1446,18 @@ int main(void)
                 rle_n = 0u;
                 lcd_raw_idle();
                 stall = 0u;
+            }
+        }
+
+        /* 半帧残留自愈：所有收流状态都关掉之后，手上还剩 1..5 字节（6 字节
+         * 定界永远补不齐）且 100 ms 没有新字节，就整段丢掉重新对齐。 */
+        if (rx_len > 0 && rx_len < 6
+            && raw_left == 0u && !asset_rx && !up_rx_on && !sig_rx) {
+            uint32_t tt = systick_now();
+
+            if ((tt - rx_last_tick) >= RX_IDLE_FLUSH_MS * 48000u) {
+                rx_len = 0;
+                rx_last_tick = tt;
             }
         }
 
@@ -1632,6 +1707,23 @@ int main(void)
                     }
                     stall = 0u;
                     continue;
+                }
+
+                /* 填充字节：完全空闲时连续 ≥ RX_PAD_RUN 个 0x00 只可能是
+                 * 上位机垫的对齐填充（6 字节帧最多 5 个前导 0，class 0 sub 0
+                 * 本身就是空帧），直接跳过；收流中途不做这件事。
+                 * 只按 6 的整数倍跳过：万一下一帧恰好也以 0x00 开头，多出来
+                 * 的那个 0 必须留给它，否则反而把边界推错一位。 */
+                if (raw_left == 0u && !asset_rx && !up_rx_on && !sig_rx
+                    && rx[pos] == 0x00u) {
+                    int z = 0;
+
+                    while (pos + z < rx_len && rx[pos + z] == 0x00u)
+                        z++;
+                    if (z >= RX_PAD_RUN) {
+                        pos += z - (z % 6);
+                        continue;
+                    }
                 }
 
                 if (rx_len - pos >= 6) {

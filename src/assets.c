@@ -436,6 +436,67 @@ static int rle_blit(uint8_t kind, uint8_t idx, int sx0, int sy0,
     return 1;
 }
 
+/* ---------- 待机淡入：两路带子解码 ----------
+ * 淡入的两张图要同时逐带子前进，不能共用 rle_st，所以每路各留一套解码
+ * 游标（约 90 B × 2）；fmt=0 直接按 640 B 读 flash，fmt=1 用流式 RLE 解压，
+ * 黑场（0xFF 淡入）当成全 0 的虚拟帧。这样三种来源在调用方看来是同一种
+ * “带子”，每轮只用两条 640 B 带子 + 一份混色输出，不需要整幅缓冲。 */
+typedef struct {
+    rle_stream_t rle;
+    uint32_t     addr;          /* fmt=0 时下一带子（2 行）的 flash 地址 */
+    uint8_t      fmt;           /* 0=RGB565 1=RLE 2=黑场 3=坏槽 */
+} fade_lane_t;
+
+static fade_lane_t fade_lane[2];
+
+void asset_fade_open(uint8_t lane, uint8_t kind, uint8_t idx, uint8_t black)
+{
+    fade_lane_t *l = &fade_lane[lane & 1u];
+    uint8_t hdr[HDR_SIZE];
+
+    if (black) {
+        l->fmt = 2u;                    /* 黑场：不读 flash，asset_fade_band 填 0 */
+        return;
+    }
+    flash_read(asset_slot_addr(kind, idx), hdr, (int)HDR_SIZE);
+    l->addr = asset_slot_addr(kind, idx) + HDR_SIZE;
+    l->fmt = (hdr[8] <= 1u) ? hdr[8] : 3u;
+    l->rle.addr = l->addr;
+    l->rle.left = get32(hdr + 10);
+    l->rle.fill = 0u;
+    l->rle.pos = 0u;
+    l->rle.cnt = 0u;
+}
+
+int asset_fade_band(uint8_t lane, uint8_t *dst)
+{
+    fade_lane_t *l = &fade_lane[lane & 1u];
+    uint32_t i;
+
+    if (l->fmt == 2u) {                 /* 黑场虚拟帧 */
+        for (i = 0u; i < 640u; i++)
+            dst[i] = 0u;
+        return 1;
+    }
+    if (l->fmt == 1u) {
+        for (i = 0u; i < 320u; i++) {   /* 2 行 × 160 像素 */
+            uint8_t hi, lo;
+
+            if (!rle_next_pixel(&l->rle, &hi, &lo))
+                return 0;               /* 压缩数据提前用完：按坏槽处理 */
+            dst[i * 2u] = hi;
+            dst[i * 2u + 1u] = lo;
+        }
+        return 1;
+    }
+    if (l->fmt == 0u) {
+        flash_read(l->addr, dst, 640);  /* 此时屏 CS 必须是高的 */
+        l->addr += 640u;
+        return 1;
+    }
+    return 0;
+}
+
 int asset_draw(uint8_t kind, uint8_t idx)
 {
     uint8_t fmt;

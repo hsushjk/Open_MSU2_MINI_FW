@@ -97,6 +97,14 @@ int      asset_draw(uint8_t kind, uint8_t idx);
  * x/y 可以是负数（左/上被裁掉），越界安全。返回 1 表示画了（或整幅在屏外），0 表示槽无效。 */
 int      asset_blit(uint8_t kind, uint8_t idx, int x, int y);
 
+/* 待机交叉淡入用的两路带子解码（fmt=0/1 都能走，0xFF 走“黑场”虚拟帧）。
+ * 淡入的每一步把 from / to 各解出 2 行（640 B），所以两张图都不需要整幅
+ * 缓冲：fmt=1 时 RLE 解码游标跨带子保留，只有每步开始时才回到图首。
+ * asset_fade_open(lane, kind, idx, black) 初始化第 lane(0/1) 路；
+ * asset_fade_band(lane, dst) 取下一带 640 B，返回 0 表示槽坏了/数据不够。 */
+void     asset_fade_open(uint8_t lane, uint8_t kind, uint8_t idx, uint8_t black);
+int      asset_fade_band(uint8_t lane, uint8_t *dst);
+
 void settings_default(settings_t *s);
 int  settings_load(settings_t *s);
 int  settings_save(const settings_t *s);
@@ -145,7 +153,7 @@ extern uint8_t  cfg_selected;
 #define FW_VER_MINOR  0u
 #endif
 #ifndef FW_VER_PATCH
-#define FW_VER_PATCH  4u
+#define FW_VER_PATCH  5u
 #endif
 
 #endif /* FW_H */
