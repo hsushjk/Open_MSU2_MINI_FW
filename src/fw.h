@@ -81,7 +81,8 @@ typedef struct {
 uint32_t asset_slot_addr(uint8_t kind, uint8_t idx);
 uint32_t asset_max_len(void);
 uint32_t asset_data_addr(uint8_t kind, uint8_t idx);
-void     asset_begin(uint8_t kind, uint8_t idx, uint32_t len);
+uint8_t  asset_format(uint8_t kind, uint8_t idx);
+void     asset_begin(uint8_t kind, uint8_t idx, uint32_t len, uint8_t fmt);
 void     asset_feed(const uint8_t *src, int n);
 int      asset_writing(void);
 void     asset_abort(void);
@@ -144,7 +145,7 @@ extern uint8_t  cfg_selected;
 #define FW_VER_MINOR  0u
 #endif
 #ifndef FW_VER_PATCH
-#define FW_VER_PATCH  3u
+#define FW_VER_PATCH  4u
 #endif
 
 #endif /* FW_H */

@@ -417,6 +417,13 @@ static void standby_fade(uint8_t from, uint8_t to)
 
     if (!asset_valid(ASSET_STANDBY, to))
         return;
+    /* 淡入淡出是直接按裸 RGB565 的地址读带子的；遇到 fmt=1（RLE）就退回
+     * 直接整幅画：宁可少一次渐变，也不能把压缩字节当像素读。 */
+    if (asset_format(ASSET_STANDBY, to) != 0u ||
+        (from != 0xFFu && asset_format(ASSET_STANDBY, from) != 0u)) {
+        (void)asset_draw(ASSET_STANDBY, to);
+        return;
+    }
     a_base = (from == 0xFFu) ? 0u : asset_data_addr(ASSET_STANDBY, from);
     b_base = asset_data_addr(ASSET_STANDBY, to);
 
@@ -1014,11 +1021,16 @@ static void handle_frame(const uint8_t *f)
             sig_pos = 0u;
             return;
         }
-        if (sub == 0x01u) {                    /* 开始写：kind idx len_hi len_lo */
+        if (sub == 0x01u) {                    /* 开始写：kind(bit7=fmt) idx len_hi len_lo */
+            uint8_t kf = f[2];
             uint32_t len = ((uint32_t)f[4] << 8) | (uint32_t)f[5];
+
             lcd_raw_idle();
             standby_mode = 0u;
-            asset_begin(f[2], f[3], len);
+            /* kind 最高位携带数据格式：0 = 裸 RGB565（老主机，默认），
+             * 1 = RLE。低 7 位还是槽类型，所以旧上位机发 0/1 完全不受影响。 */
+            asset_begin((uint8_t)(kf & 0x7Fu), f[3], len,
+                        (uint8_t)((kf >> 7) & 1u));
             asset_rx = 0u;              /* 分窗模式：数据由 0A 08 一段一段喂 */
             asset_rx_left = 0u;
             asset_win = 0u;

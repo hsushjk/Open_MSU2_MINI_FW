@@ -1,18 +1,27 @@
 /* 板载 NOR（P25D80H，1 MB）上的“资产”：开机画面 + 待机画面，外加一小块设置。
  *
  * 分区（NOR 1 MB）：
- *   0x000000  开机画面   1 槽（32 KB 区，实占 20 B 头 + 25 600 B 像素）
+ *   0x000000  开机画面   1 槽（32 KB 区，实占 20 B 头 + ≤26 604 B 数据）
  *   0x008000  待机画面  16 槽（0x008000 + idx * 0x6800）
  *   0x080000  应用镜像  自更新暂存区（见 selfupdate.c）
  *   0x0A0000  更新标志  4 KB
  *   0x0FF000  设置区    32 字节
  *
- * 每槽开头 16 字节头：
+ * 每槽开头 20 字节头：
  *   'M''S''A''1' | w(2) | h(2) | fmt(1) | flags(1) | len(4) | crc32(4) | pad(2)
- * 之后是 len 字节像素（RGB565 小端）。
+ * 之后是 len 字节数据。fmt 决定数据格式：
+ *   fmt=0 裸 RGB565，高字节在前，len 固定 25 600（老图，仍能画）
+ *   fmt=1 RLE，3 字节一包 [cnt, hi, lo]，与屏流 rle_feed 同一套；
+ *         cnt 是 1..255 的重复像素数（0 = 0 个像素，编码器不会发），
+ *         len 是压缩后长度，crc32 也算压缩数据。
  *
- * 写入是流式的：begin(kind, idx, len) → 推 len 个字节 → commit(crc32)。
+ * 写入是流式的：begin(kind, idx, len, fmt) → 推 len 个字节 → commit(crc32)。
  * 写之前先擦干净；数据写完才写头，所以中途断电的槽仍然算空。
+ *
+ * RAM 只有 20 KB，一张 RGB565 满屏就要 25 600 B，所以 fmt=1 不整张解压：
+ * 解码器是个像素游标（剩余重复数 / 当前颜色 / 64 B flash 读缓冲），
+ * 每次只把当前 2 行（最多 640 B）拼进 band[] 就送屏。fmt=0 的带子路径
+ * 也用同一个 band[]，所以新增 RLE 没有多占一条屏缓冲。
  */
 
 #include "fw.h"
@@ -35,6 +44,7 @@ static uint32_t wr_left;
 static uint32_t wr_crc;
 static uint8_t  wr_buf[PAGE_SIZE];
 static uint32_t wr_fill;
+static uint8_t  wr_fmt;         /* 本槽数据的格式（0=RGB565，1=RLE） */
 static uint16_t slot_ok;        /* 待机槽的“已校验”位图（16 槽） */
 static uint8_t  boot_ok;        /* 开机图已校验 */
 
@@ -82,14 +92,20 @@ static void wr_flush_page(void)
     wr_fill = 0u;
 }
 
-void asset_begin(uint8_t kind, uint8_t idx, uint32_t len)
+void asset_begin(uint8_t kind, uint8_t idx, uint32_t len, uint8_t fmt)
 {
     uint32_t base = asset_slot_addr(kind, idx);
     uint32_t a;
 
     wr_active = 0u;
-    if (len == 0u || len > asset_max_len())
+    if (fmt > 1u)
         return;
+    if (fmt == 0u) {
+        if (len != 160u * 80u * 2u)     /* 裸图必须正好一张屏 */
+            return;
+    } else if (len == 0u || len > asset_max_len()) {
+        return;                         /* RLE 长度必须装得进槽 */
+    }
 
     for (a = base; a < base + HDR_SIZE + len; a += 4096u) {
         flash_erase_4k(a);
@@ -99,6 +115,7 @@ void asset_begin(uint8_t kind, uint8_t idx, uint32_t len)
     wr_kind = kind;
     wr_idx = idx;
     wr_len = len;
+    wr_fmt = fmt;
     wr_addr = base + HDR_SIZE;
     wr_left = len;
     wr_fill = 0u;
@@ -161,7 +178,7 @@ int asset_finish(uint32_t expect_crc)
     put32(hdr, ASSET_MAGIC);
     hdr[4] = 160u; hdr[5] = 0u;      /* 宽 */
     hdr[6] = 80u;  hdr[7] = 0u;      /* 高 */
-    hdr[8] = 0u;                     /* fmt: RGB565 */
+    hdr[8] = wr_fmt;                 /* 0=RGB565，1=RLE */
     hdr[9] = 0u;
     put32(hdr + 10, wr_len);
     put32(hdr + 14, crc);
@@ -184,17 +201,35 @@ void asset_erase(uint8_t kind, uint8_t idx)
 static int hdr_ok(uint8_t kind, uint8_t idx)
 {
     uint8_t hdr[HDR_SIZE];
+    uint8_t fmt;
+    uint32_t len;
 
     flash_read(asset_slot_addr(kind, idx), hdr, (int)HDR_SIZE);
     if (get32(hdr) != ASSET_MAGIC)
         return 0;
     if (get16(hdr + 4) != 160u || get16(hdr + 6) != 80u)
         return 0;
-    if (hdr[8] != 0u)
-        return 0;
-    if (get32(hdr + 10) != 160u * 80u * 2u)
-        return 0;
-    return 1;
+    fmt = hdr[8];
+    len = get32(hdr + 10);
+    if (fmt == 0u)
+        return (len == 160u * 80u * 2u) ? 1 : 0;
+    if (fmt == 1u)
+        return (len >= 1u && len <= asset_max_len()) ? 1 : 0;
+    return 0;
+}
+
+/* 槽里图像的数据格式：0=RGB565，1=RLE，0xFF=槽头不合法。
+ * standby_fade 只会按裸 RGB565 的地址直接读带子，所以它得先问格式。 */
+uint8_t asset_format(uint8_t kind, uint8_t idx)
+{
+    uint8_t hdr[HDR_SIZE];
+
+    flash_read(asset_slot_addr(kind, idx), hdr, (int)HDR_SIZE);
+    if (get32(hdr) != ASSET_MAGIC)
+        return 0xFFu;
+    if (get16(hdr + 4) != 160u || get16(hdr + 6) != 80u)
+        return 0xFFu;
+    return hdr[8];
 }
 
 /* 校验 CRC（读一整帧≈25 KB，只在需要时做，结果缓存在 slot_ok 里） */
@@ -288,12 +323,130 @@ uint32_t asset_data_addr(uint8_t kind, uint8_t idx)
     return asset_slot_addr(kind, idx) + HDR_SIZE;
 }
 
+/* ---------- fmt=1：流式 RLE 解压 ----------
+ * 包 = [cnt, hi, lo]，与屏流的 rle_feed 同一套：cnt 是重复像素数（1..255）。
+ *
+ * 内存策略：不整张解压。解码器保存“像素游标”（flash 读缓冲 + 剩余重复数 +
+ * 当前颜色），每次只把当前 2 行拼进 band_buf 就送屏；RLE 状态跨带子保留，
+ * 所以 25 600 B 的一屏只需要 640 B 带子 + 约 90 B 解码状态。
+ * 和 fmt=0 的带子路径共用同一条 band_buf，净 RAM 占用没有增加。
+ */
+#define RLE_CHUNK 64u
+
+typedef struct {
+    uint32_t addr;              /* 压缩数据里下一个字节的 flash 地址 */
+    uint32_t left;              /* 还没读的压缩字节数 */
+    uint8_t  buf[RLE_CHUNK];    /* flash 读缓冲 */
+    uint8_t  fill;              /* buf 里有效字节数 */
+    uint8_t  pos;               /* buf 里的读位置 */
+    uint8_t  cnt;               /* 当前颜色还剩几个像素 */
+    uint8_t  hi;                /* 当前像素高字节 */
+    uint8_t  lo;                /* 当前像素低字节 */
+} rle_stream_t;
+
+static rle_stream_t rle_st;
+static uint8_t band_buf[640];   /* 2 行 × 160 像素 × 2 字节，fmt=0/1 共用 */
+
+static int rle_next_byte(rle_stream_t *s, uint8_t *out)
+{
+    if (s->pos >= s->fill) {
+        uint32_t n;
+
+        if (s->left == 0u)
+            return 0;                       /* 压缩数据提前用完：槽坏了 */
+        n = (s->left > RLE_CHUNK) ? RLE_CHUNK : s->left;
+        flash_read(s->addr, s->buf, (int)n); /* 此时屏 CS 必须是高的 */
+        s->addr += n;
+        s->left -= n;
+        s->fill = (uint8_t)n;
+        s->pos = 0u;
+        *(volatile uint32_t *)0x40003000u = 0xAAAAu;
+    }
+    *out = s->buf[s->pos++];
+    return 1;
+}
+
+static int rle_next_pixel(rle_stream_t *s, uint8_t *hi, uint8_t *lo)
+{
+    while (s->cnt == 0u) {
+        uint8_t c;
+
+        if (!rle_next_byte(s, &c))
+            return 0;
+        if (!rle_next_byte(s, &s->hi))
+            return 0;
+        if (!rle_next_byte(s, &s->lo))
+            return 0;
+        s->cnt = c;                     /* c=0 等于这一包含 0 像素，继续读下一包 */
+    }
+    s->cnt--;
+    *hi = s->hi;
+    *lo = s->lo;
+    return 1;
+}
+
+/* 把槽里图像的 (sx0..sx1, sy0..sy1) 区域解压后画到目标 (x, y)。
+ * 交错顺序和 fmt=0 一样：屏 CS 高时 flash_read → 开屏流推 2 行 → 抬 CS。
+ * 每收满 2 行（或最后一行）就送一次，所以同时只有一条 640 B 带子在 RAM 里。
+ * 返回 1 = 画完，0 = 数据不完整（按坏图处理，已经画出去的行不回收）。 */
+static int rle_blit(uint8_t kind, uint8_t idx, int sx0, int sy0,
+                    int sx1, int sy1, int x, int y)
+{
+    rle_stream_t *s = &rle_st;
+    uint8_t hdr[HDR_SIZE];
+    int width = sx1 - sx0;
+    int row_bytes = width * 2;
+    int sx, sy;
+
+    flash_read(asset_slot_addr(kind, idx), hdr, (int)HDR_SIZE);
+    s->addr = asset_slot_addr(kind, idx) + HDR_SIZE;
+    s->left = get32(hdr + 10);
+    s->fill = 0u;
+    s->pos = 0u;
+    s->cnt = 0u;
+
+    for (sy = 0; sy < 80; sy++) {
+        int inside = (sy >= sy0 && sy < sy1);
+        int slot = inside ? ((sy - sy0) & 1) : 0;
+        uint8_t *dst = band_buf + (uint32_t)slot * (uint32_t)row_bytes;
+
+        for (sx = 0; sx < 160; sx++) {
+            uint8_t hi, lo;
+
+            if (!rle_next_pixel(s, &hi, &lo))
+                return 0;
+            if (inside && sx >= sx0 && sx < sx1) {
+                uint32_t o = (uint32_t)(sx - sx0) * 2u;
+
+                dst[o] = hi;
+                dst[o + 1u] = lo;
+            }
+        }
+        if (inside && (slot == 1 || sy == sy1 - 1)) {
+            int rows = slot + 1;
+            int top = y + sy - slot;
+
+            lcd_stream_begin(x + sx0, top, x + sx0 + width, top + rows);
+            lcd_raw_write(band_buf, (uint32_t)(row_bytes * rows));
+            lcd_raw_idle();
+        }
+        if (sy + 1 >= sy1)
+            break;                      /* 交集下面的行不用再解了 */
+    }
+    return 1;
+}
+
 int asset_draw(uint8_t kind, uint8_t idx)
 {
-    static uint8_t row[640];         /* 4 行像素 */
+    uint8_t fmt;
 
     if (!asset_valid(kind, idx))
         return 0;
+
+    lcd_raw_idle();                     /* 读 flash 前先抬屏 CS（PA6 共用 MISO/DC） */
+    fmt = asset_format(kind, idx);
+    if (fmt == 1u)
+        return rle_blit(kind, idx, 0, 0, 160, 80, 0, 0);
 
     /*
      * 这块板子上 SPI 是屏和 flash 共用的，而且 PA6 一脚兼 flash 的 MISO 与屏的 D/C。
@@ -311,10 +464,10 @@ int asset_draw(uint8_t kind, uint8_t idx)
         int y;
 
         for (y = 0; y < 80; y += 2) {
-            flash_read(addr, row, (int)sizeof(row));      /* 此时屏未选中 */
-            addr += sizeof(row);
+            flash_read(addr, band_buf, (int)sizeof(band_buf));  /* 此时屏未选中 */
+            addr += sizeof(band_buf);
             lcd_stream_begin(0, y, 160, y + 2);           /* 只覆盖这 2 行 */
-            lcd_raw_write(row, sizeof(row));
+            lcd_raw_write(band_buf, sizeof(band_buf));
             lcd_raw_idle();                               /* 等 DMA、抬 CS */
         }
     }
@@ -331,7 +484,6 @@ int asset_draw(uint8_t kind, uint8_t idx)
  *      0 = kind/槽号越界或该槽没有合法图像。 */
 int asset_blit(uint8_t kind, uint8_t idx, int x, int y)
 {
-    static uint8_t band[640];         /* 2 行 × 160 像素 × 2 字节 */
     int sx0, sy0, sx1, sy1;
     int width, row_bytes, dy;
     uint32_t base;
@@ -356,6 +508,9 @@ int asset_blit(uint8_t kind, uint8_t idx, int x, int y)
     if (sx1 <= sx0 || sy1 <= sy0)
         return 1;                     /* 完全在屏外：合法请求，什么都不画 */
 
+    if (asset_format(kind, idx) == 1u)
+        return rle_blit(kind, idx, sx0, sy0, sx1, sy1, x, y);
+
     base = asset_data_addr(kind, idx);
     width = sx1 - sx0;
     row_bytes = width * 2;
@@ -366,9 +521,9 @@ int asset_blit(uint8_t kind, uint8_t idx, int x, int y)
 
         for (r = 0; r < rows; r++)
             flash_read(base + (uint32_t)(dy + r) * 320u + (uint32_t)sx0 * 2u,
-                       band + r * row_bytes, row_bytes);
+                       band_buf + r * row_bytes, row_bytes);
         lcd_stream_begin(x + sx0, y + dy, x + sx0 + width, y + dy + rows);
-        lcd_raw_write(band, (uint32_t)(row_bytes * rows));
+        lcd_raw_write(band_buf, (uint32_t)(row_bytes * rows));
         lcd_raw_idle();
     }
     return 1;
