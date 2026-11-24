@@ -1,6 +1,6 @@
 /* Standalone firmware linker script.
  *
- * The chip has 64 KB of internal flash. The application image is mapped to
+ * The chip has 64 KB of internal flash (62 KB usable). The application image is mapped to
  * 0x0000-0xF000 (60 KB); the page at 0xF000 is kept for the erase/program
  * self-check and is never linked into the image. SRAM is 20 KB at 0x20000000.
  */
