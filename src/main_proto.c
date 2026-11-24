@@ -703,9 +703,12 @@ static void handle_frame(const uint8_t *f)
         rr[0] = 0x14u; rr[1] = 0x00u; rr[2] = 0x06u;
         rr[3] = 0u; rr[4] = 0u; rr[5] = 0u;
         usb_write(rr, 6);
-        delay_ms(30);
-        (void)update_apply();                 /* 体检不过会返回，继续跑老固件 */
-        update_clear_apply_flag();
+        delay_ms(60);
+        /* v77 起由 0x0000 的常驻引导负责搬运：这里只写标志然后复位，
+           应用自己的代码永远不会覆盖 0x0000-0x0FFF，所以不可能把自己写死。 */
+        *(volatile uint32_t *)0xE000ED0Cu = 0x05FA0004u;
+        for (;;)
+            ;
         return;
     }
 
@@ -1029,7 +1032,10 @@ int main(void)
 
     /* 上次点过“一键刷机”：镜像已在 NOR 里，这里把它写进内部 flash 并重启。
      * update_apply() 跑在 RAM 里；体检不过就返回，设备继续用老固件，不会变砖。 */
-    if (update_pending()) {
+    /* v76: 自动搬运已停用 —— NOR 里可能留着上一版失败的镜像，
+       上电时先别碰内部 flash，等主机显式下发命令再搬。 */
+    /* 搬运交给 0x0000 的常驻引导 */
+    if (0) {
         (void)update_apply();
         update_clear_apply_flag();
     }

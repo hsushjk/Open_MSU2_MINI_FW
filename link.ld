@@ -5,7 +5,7 @@ ENTRY(_start)
 
 MEMORY
 {
-    FLASH (rx)  : ORIGIN = 0x00000000, LENGTH = 62K
+    FLASH (rx)  : ORIGIN = 0x00001000, LENGTH = 56K
     RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = 20K
 }
 
