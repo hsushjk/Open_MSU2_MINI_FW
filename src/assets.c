@@ -321,6 +321,59 @@ int asset_draw(uint8_t kind, uint8_t idx)
     return 1;
 }
 
+/* 把槽里的图按目标左上角 (x, y) 画到屏幕上，只画与 160x80 的交集。
+ * (x, y) 允许负数：图被左边/上边裁掉；右下越界也照样裁掉，越界安全。
+ * 结构照抄 asset_draw()：屏与 flash 共用 SPI，PA6 还兼 flash 的 MISO 与屏的
+ * D/C，所以一条 2 行带子必须是“屏 CS 高时 flash_read 到 RAM → 再开屏流推
+ * 出去”，中途绝不能反过来（否则读出 flash 的时钟会打进屏里）。
+ * 窗口每条带子单独重设，所以源地址按行跳、按列裁都没问题。
+ * 返回 1 = 画完（整幅都在屏外也算成功：命令合法，只是没像素落在屏上），
+ *      0 = kind/槽号越界或该槽没有合法图像。 */
+int asset_blit(uint8_t kind, uint8_t idx, int x, int y)
+{
+    static uint8_t band[640];         /* 2 行 × 160 像素 × 2 字节 */
+    int sx0, sy0, sx1, sy1;
+    int width, row_bytes, dy;
+    uint32_t base;
+
+    if (kind > 1u)
+        return 0;
+    if (kind == 1u && idx >= STANDBY_SLOTS)
+        return 0;                     /* 越界槽号直接拒绝，不能被 asset_slot_addr 夹到 0 号槽 */
+    lcd_raw_idle();                   /* 先抬屏 CS，下面的 asset_valid/flash_read 才能用 SPI */
+    if (!asset_valid(kind, idx))
+        return 0;
+
+    /* 求交集：源坐标 sx0..sx1、sy0..sy1（图内），目标坐标 = 源坐标 + (x, y) */
+    sx0 = (x < 0) ? -x : 0;
+    sy0 = (y < 0) ? -y : 0;
+    sx1 = (x > 0) ? (160 - x) : 160;
+    sy1 = (y > 0) ? (80 - y) : 80;
+    if (sx1 > 160)
+        sx1 = 160;
+    if (sy1 > 80)
+        sy1 = 80;
+    if (sx1 <= sx0 || sy1 <= sy0)
+        return 1;                     /* 完全在屏外：合法请求，什么都不画 */
+
+    base = asset_data_addr(kind, idx);
+    width = sx1 - sx0;
+    row_bytes = width * 2;
+
+    for (dy = sy0; dy < sy1; dy += 2) {
+        int rows = (sy1 - dy >= 2) ? 2 : 1;
+        int r;
+
+        for (r = 0; r < rows; r++)
+            flash_read(base + (uint32_t)(dy + r) * 320u + (uint32_t)sx0 * 2u,
+                       band + r * row_bytes, row_bytes);
+        lcd_stream_begin(x + sx0, y + dy, x + sx0 + width, y + dy + rows);
+        lcd_raw_write(band, (uint32_t)(row_bytes * rows));
+        lcd_raw_idle();
+    }
+    return 1;
+}
+
 /* ---------- 设置区（32 字节） ---------- */
 
 void settings_default(settings_t *s)

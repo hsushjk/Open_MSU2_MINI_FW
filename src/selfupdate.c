@@ -36,8 +36,7 @@
 #define FLASH_CTLR_MER   (1u << 2)
 #define FLASH_CTLR_STRT  (1u << 6)
 
-/* 每次启动都会跑的探测区间（内部 flash 高段，应用只有 ~15 KB 用不到这里） */
-#define IFLASH_PROBE_ADDR 0x7000u   /* 28 KB：图只有 17 KB，若 flash 只有 32 KB 这里也在范围内 */
+/* 体检页地址统一在 fw.h 里定义（IFLASH_PROBE_ADDR = 0xF000，应用区止于 0xEFFF） */
 
 static void up_iwdg(void)
 {
@@ -227,7 +226,8 @@ int update_pending(void)
 #define IFLASH_ALIAS    0x08000000u        /* 内部 flash 的编程别名窗口 */
 #define IFLASH_SPAN     0xF800u            /* 62 KB */
 
-/* 上次搬运的结果：0=成功，1=头不对，2=长度不对，3=体检失败，4=写回校验失败 */
+/* 上次搬运的结果：0=成功，1=头不对，2=长度不对，3=体检失败，4=写回校验失败，
+ * 5=整段 CRC 与头里对不上（此时内部 flash 一个字节都没动） */
 volatile uint8_t g_up_result __attribute__((section(".noinit")));
 
 static void __attribute__((section(".ramfunc"), noinline)) ram_wait(void)
@@ -314,6 +314,34 @@ static void __attribute__((section(".ramfunc"), noinline)) ram_nor_read(uint32_t
     img_cs(1);
 }
 
+/* 整段 CRC32（与 assets.c 的 asset_crc32_byte 同一套逐位算法，不查表）。
+ * 只读 NOR、不碰内部 flash，所以可以在擦除之前调用；跑在 RAM 里，
+ * 将来就算挪到擦除之后也还能用。 */
+static uint32_t __attribute__((section(".ramfunc"), noinline))
+ram_nor_crc(uint32_t nor_addr, uint32_t len)
+{
+    uint8_t buf[256];
+    uint32_t crc = 0xFFFFFFFFu;
+    uint32_t off;
+
+    for (off = 0u; off < len; off += 256u) {
+        uint32_t n = len - off;
+        uint32_t i;
+        uint32_t bit;
+
+        if (n > 256u)
+            n = 256u;
+        ram_nor_read(nor_addr + off, buf, n);
+        for (i = 0u; i < n; i++) {
+            crc ^= (uint32_t)buf[i];
+            for (bit = 0u; bit < 8u; bit++)
+                crc = ((crc & 1u) != 0u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+        }
+        up_iwdg();
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
 int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
 {
     uint8_t hdr[APPIMG_HDR];
@@ -321,6 +349,7 @@ int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
     uint32_t off;
     uint32_t len;
     uint32_t i;
+    uint32_t crc_want;
 
     /* 1. 读镜像头 */
     ram_nor_read(APPIMG_ADDR, hdr, APPIMG_HDR);
@@ -338,23 +367,34 @@ int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
         return 2;
     }
 
-    /* 2. 体检：擦 + 写 + 读回，只要时序不对就在这里失败，内部 flash 一点没动 */
+    /* 2. 整段 CRC 预检：把 NOR 里的镜像再逐块读一遍算 CRC32，与头里的比。
+     *    对不上就直接返回，**绝不擦内部 flash**：擦掉能跑的旧固件又搬不进新固件
+     *    就是变砖。这一步只读 NOR（SPI 位操作在 RAM 里），中断照常开着。 */
+    crc_want = (uint32_t)hdr[10] | ((uint32_t)hdr[11] << 8) |
+               ((uint32_t)hdr[12] << 16) | ((uint32_t)hdr[13] << 24);
+    if (ram_nor_crc(APPIMG_ADDR + APPIMG_HDR, len) != crc_want) {
+        ram_dc_output();
+        g_up_result = 5u;
+        return 5;
+    }
+
+    /* 3. 体检：擦 + 写 + 读回，只要时序不对就在这里失败，内部 flash 一点没动 */
     ram_unlock();
-    ram_erase_page(IFLASH_ALIAS + 0x7000u);
+    ram_erase_page(IFLASH_ALIAS + IFLASH_PROBE_ADDR);
     for (i = 0u; i < 256u; i++)
         buf[i] = (uint8_t)(i ^ 0x5Au);
-    ram_program_page(IFLASH_ALIAS + 0x7000u, buf);
+    ram_program_page(IFLASH_ALIAS + IFLASH_PROBE_ADDR, buf);
     for (i = 0u; i < 256u; i++) {
-        if (*(volatile uint8_t *)(IFLASH_ALIAS + 0x7000u + i) != buf[i]) {
+        if (*(volatile uint8_t *)(IFLASH_ALIAS + IFLASH_PROBE_ADDR + i) != buf[i]) {
             ram_dc_output();
             g_up_result = 3u;
             return 3;
         }
     }
-    ram_erase_page(IFLASH_ALIAS + 0x7000u);
+    ram_erase_page(IFLASH_ALIAS + IFLASH_PROBE_ADDR);
     ram_dc_output();
 
-    /* 3. 擦掉应用区（等于擦掉向量表，所以从现在起关中断、只跑 RAM 里的代码） */
+    /* 4. 擦掉应用区（等于擦掉向量表，所以从现在起关中断、只跑 RAM 里的代码） */
     __asm__ volatile("csrci mstatus, 8");
 
     for (off = 0u; off < len; off += 1024u) {
@@ -362,7 +402,7 @@ int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
         ram_iwdg();
     }
 
-    /* 4. 按 256 字节一页从 NOR 搬进内部 flash，并读回校验 */
+    /* 5. 按 256 字节一页从 NOR 搬进内部 flash，并读回校验 */
     for (off = 0u; off < len; off += 256u) {
         ram_nor_read(APPIMG_ADDR + APPIMG_HDR + off, buf, 256u);
         ram_program_page(IFLASH_ALIAS + off, buf);
@@ -376,13 +416,14 @@ int __attribute__((section(".ramfunc"), noinline)) update_apply(void)
     }
     ram_lock();
 
-    /* 5. 复位，让新固件跑起来 */
+    /* 6. 复位，让新固件跑起来 */
     g_up_result = 0u;
     ram_reset();
     return 0;
 }
 
-/* 体检：擦一页 0x7000、写 8 字节、读回比对。只用于验证写序列，不碰应用区。 */
+/* 体检：擦一页 IFLASH_PROBE_ADDR（0xF000，应用区之外）、写 8 字节、读回比对。
+ * 只用于验证写序列，不碰应用区。 */
 int update_probe(void)
 {
     uint8_t want[8];

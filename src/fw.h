@@ -47,6 +47,11 @@ int     flash_erase_chip_now(void);
 int     flash_is_blank(uint32_t addr, int n);
 
 /* ---- 免拆自更新（selfupdate.c） ---- */
+/* 内部 flash 体检页：应用区只到 0xEFFF（link.ld 里 60 KB 且有 ASSERT），
+ * 所以体检只能用 0xF000 这一页；原来的 0x7000 落在应用区里，固件一大
+ * 体检就会把正在跑的代码擦掉。OTA 的 update_apply() 和 0A 23/0A 17
+ * 的 update_probe() 都必须用这一个地址。 */
+#define IFLASH_PROBE_ADDR 0xF000u
 int  update_stage_begin(uint32_t len);
 void update_stage_feed(const uint8_t *src, int n);
 int  update_stage_commit(uint32_t crc);
@@ -88,6 +93,9 @@ int      asset_valid(uint8_t kind, uint8_t idx);
 int     asset_verify(uint8_t kind, uint8_t idx, uint32_t *calc);
 void    asset_invalidate(void);
 int      asset_draw(uint8_t kind, uint8_t idx);
+/* 把槽里的图按目标左上角 (x, y) 画到屏上，只画与 160x80 的交集；
+ * x/y 可以是负数（左/上被裁掉），越界安全。返回 1 表示画了（或整幅在屏外），0 表示槽无效。 */
+int      asset_blit(uint8_t kind, uint8_t idx, int x, int y);
 
 void settings_default(settings_t *s);
 int  settings_load(settings_t *s);
@@ -134,7 +142,7 @@ extern uint8_t  cfg_selected;
 #define FW_VER_MAJOR  1u
 #endif
 #ifndef FW_VER_MINOR
-#define FW_VER_MINOR  0u
+#define FW_VER_MINOR  1u
 #endif
 
 #endif /* FW_H */

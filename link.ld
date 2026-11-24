@@ -55,4 +55,11 @@ SECTIONS
     } > RAM
 
     __global_pointer$ = _sdata + 0x800;
+
+    /* 应用镜像不许越过 0xF000：这一页留给 IFLASH_PROBE_ADDR 的擦写体检
+     * （selfupdate.c 的 update_apply() 与 update_probe() 都会擦它）。
+     * 越界的话每次体检都会擦掉正在运行的代码。FLASH 区长度 60K 正好等于
+     * 0xF000，这里再显式断言一次：以后谁把 FLASH LENGTH 改大，链接就会报错。 */
+    ASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xF000,
+           "application image overruns the 0xF000 internal-flash probe page")
 }

@@ -58,8 +58,20 @@ static uint8_t standby_mode = 1u;
 static uint8_t boot_shown;    /* 屏幕上现在是开机画面：按 boot_hold 秒数停留 */
 static uint8_t blink_first = 1u;      /* 待机画面还没画过 */
 static uint8_t blink_on = 1u;         /* 当前方块颜色 1=白 0=黄 */
+static uint32_t standby_wait;         /* 待机动画已攒的拍数（主循环每圈 +1） */
 static uint32_t idle_ms;              /* 没收到任何字节的粗略毫秒数 */
 static uint32_t win_px;   /* 当前流的窗口像素数，用于整帧角标判定 */
+
+/* 待机动画节拍：主循环空闲时每圈末尾 delay_ms(1)，所以 1000 拍 ≈ 1 秒
+ * （lcd.c 的 DELAY_MS_LOOPS 是实测标定的 1 ms 空循环数）。方块翻色、换图
+ * 都只累加这个拍数，不调用 delay_ms 长等待，USB 与命令处理一刻都不停。 */
+#define STANDBY_BLINK_TICKS 1000u
+
+/* OTA 上传窗口半开会话的作废阈值（单位：主循环圈数，不是毫秒也不是字节）。
+ * 空闲时一圈 ≈ 1 ms，所以 400 圈 ≈ 0.4 秒：正常 1 KB 窗口之间的间隔只有
+ * 几毫秒，够用；主机崩了也能在几百毫秒内恢复，而不是原来 4 000 000 圈
+ * （≈ 1 小时）。注意别照抄“200000 圈”，那在这个循环里等于 200 秒。 */
+#define UP_IDLE_LIMIT       400u
 
 static settings_t g_settings;     /* NOR 里的设置：开机/待机模式 */
 uint8_t g_boot_report;            /* 开机自检结果位图：bit0 FLASH / bit1 TOUCH / bit2 LCD / bit3 USB / bit4 SETTINGS */
@@ -564,6 +576,62 @@ static void seg_fill4(const uint8_t *p)
     }
 }
 
+/* ---------- class 0x08 的 ADC/触摸滤波 ----------
+ * adc_read() 是“取上一拍已完成的采样、启动这一拍转换、立即返回”的非阻塞写法，
+ * 所以这里一次命令只取一个采样、绝不等待（等待会让 USB 停摆）。
+ * 历史保留 3 个，取中值去掉单点尖峰；再叠 8 LSB 滞回——手指没动时触摸通道
+ * 基准值在 3900 上下抖，没有滞回的话每次都在 ±1 上跳。
+ * 回包长度不变，仍是 6 字节 [08, ch, 0, 0, hi, lo]。 */
+#define TOUCH_HIST  3u
+#define TOUCH_HYST  8u
+
+static uint16_t adc_filtered(uint8_t ch)
+{
+    static uint8_t  f_ch = 0xFFu;
+    static uint16_t hist[TOUCH_HIST];
+    static uint8_t  have;
+    static uint16_t out;
+    uint16_t v;
+    uint16_t mn;
+    uint16_t mx;
+    uint16_t med;
+    uint8_t i;
+
+    v = adc_read(ch);
+    if (ch != f_ch) {                 /* 换通道：历史作废，别把别的脚的电压算进来 */
+        f_ch = ch;
+        have = 0u;
+        out = v;
+    }
+    if (have < TOUCH_HIST) {
+        hist[have] = v;
+        have++;
+        out = v;
+        return v;                     /* 头两拍还没有中值可算，先原样回 */
+    }
+    hist[0] = hist[1];
+    hist[1] = hist[2];
+    hist[2] = v;
+
+    mn = hist[0];
+    mx = hist[0];
+    for (i = 1u; i < TOUCH_HIST; i++) {
+        if (hist[i] < mn)
+            mn = hist[i];
+        if (hist[i] > mx)
+            mx = hist[i];
+    }
+    med = (uint16_t)((uint32_t)hist[0] + hist[1] + hist[2] - mn - mx);
+
+    if (med > out) {
+        if ((uint16_t)(med - out) > TOUCH_HYST)
+            out = med;
+    } else if ((uint16_t)(out - med) > TOUCH_HYST) {
+        out = med;
+    }
+    return out;
+}
+
 static void handle_frame(const uint8_t *f)
 {
     uint8_t cls = f[0];
@@ -704,8 +772,12 @@ static void handle_frame(const uint8_t *f)
         rr[3] = 0u; rr[4] = 0u; rr[5] = 0u;
         usb_write(rr, 6);
         delay_ms(80);
-        /* update_apply() 全身在 RAM：先体检 0x7000 页，体检不过就直接返回，
-           内部 flash 一点没动；体检过了才关中断、擦应用区、逐页搬、再复位。 */
+        /* 先把屏流收尾、抬高屏 CS：update_apply() 里的 RAM 版 NOR 读是软件
+           位翻转 SPI，屏 CS 还低着的话 NOR 时钟会被屏当像素数据吃掉。 */
+        lcd_raw_idle();
+        /* update_apply() 全身在 RAM：先整段重算 CRC 比对镜像头（对不上就返回 5，
+           内部 flash 一个字节没动），再体检 0xF000 页；都过了才关中断、擦应用区、
+           逐页搬、再复位。 */
         (void)update_apply();
         /* 能走到这里说明搬运失败（否则已经复位） */
         update_clear_apply_flag();
@@ -749,20 +821,105 @@ static void handle_frame(const uint8_t *f)
             usb_write(r, 6);
             return;
         }
-        if (sub == 0x23u) {                    /* 内部 flash 写序列体检（擦+写+读回 0x7000） */
+        if (sub == 0x23u) {                    /* 内部 flash 写序列体检（擦+写+读回 0xF000 页） */
             uint8_t code = (uint8_t)(update_probe() == 0 ? 0x06u : 0x15u);
             r[0] = 0x0Au; r[1] = 0x23u; r[2] = code;
             r[3] = (uint8_t)g_up_result; r[4] = 0u; r[5] = 0u;
             usb_write(r, 6);
             return;
         }
-        if (sub == 0x24u) {                    /* 读回 0x7000 的 8 字节 */
+        if (sub == 0x24u) {                    /* 读回 0xF000 体检页的 8 字节 */
             uint32_t i;
             r[0] = 0x0Au; r[1] = 0x24u; r[2] = 8u;
             for (i = 0u; i < 8u; i++)
-                r[3 + i] = *(volatile uint8_t *)(0x08000000u + 0x7000u + i);
+                r[3 + i] = *(volatile uint8_t *)(0x08000000u + IFLASH_PROBE_ADDR + i);
             r[11] = 0xAAu;
             usb_write(r, 12);
+            return;
+        }
+        /* ---- 自检扩展（v1.0.1 新增，编号 0x15..0x18 此前未占用）----
+         * 0x15/0x16 用变长回包（第 3 字节是后续长度），和 0x0C 一样解析。 */
+        if (sub == 0x15u) {                    /* 诊断①：NOR JEDEC ID + 应用起始 16 字节
+                                                * [0A,15,19,id0,id1,id2,app0..15,AA] = 23 字节 */
+            uint8_t b[24];
+            uint8_t id[3];
+            uint32_t i;
+
+            flash_read_id(id);
+            b[0] = 0x0Au; b[1] = 0x15u; b[2] = 19u;
+            b[3] = id[0]; b[4] = id[1]; b[5] = id[2];
+            for (i = 0u; i < 16u; i++)
+                b[6u + i] = *(volatile uint8_t *)(0x08000000u + i);
+            b[22] = 0xAAu;
+            usb_write(b, 23);
+            return;
+        }
+        if (sub == 0x16u) {                    /* 诊断②：连跑 N 步待机动画并回报节拍
+                                                * [0A,16,06,steps,cad_hi,cad_lo]
+                                                *
+                                                * 这颗片的 SysTick 分频/方向不可靠（本工程约定
+                                                * 时间基准只用主循环迭代计数或 delay_ms()），
+                                                * 所以这里不报毫秒：字节 4-5 报当前待机动画的
+                                                * 节拍，单位是“主循环圈数/帧”。空闲时每圈末尾
+                                                * 都 delay_ms(1)，即 1 圈 ≈ 1 ms。
+                                                * N 步是同步真跑一遍（逐帧检查每次绘制不崩）；
+                                                * 毫秒耗时请上位机对回包做往返计时。 */
+            uint8_t steps = f[2];
+            uint8_t k;
+            uint32_t cad;
+
+            if (steps == 0u)
+                steps = 1u;
+            if (steps > 40u)
+                steps = 40u;
+
+            /* 与主循环待机状态机里的 need 完全同一套算法 */
+            if (g_settings.standby_mode == 2u)
+                cad = (uint32_t)g_settings.dwell * STANDBY_BLINK_TICKS;
+            else if (g_settings.standby_mode == 3u)
+                cad = 20u;                     /* 小球 20 圈/步 */
+            else
+                cad = STANDBY_BLINK_TICKS;     /* 四角闪烁 1000 圈/帧 */
+            if (cad > 0xFFFFu)
+                cad = 0xFFFFu;
+
+            for (k = 0u; k < steps; k++) {
+                standby_tick();
+                iwdg_feed();
+            }
+            r[0] = 0x0Au; r[1] = 0x16u; r[2] = 0x06u;
+            r[3] = steps;
+            r[4] = (uint8_t)((cad >> 8) & 0xFFu);
+            r[5] = (uint8_t)(cad & 0xFFu);
+            usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x17u) {                    /* 诊断③：内部 flash 0xF000 页擦写读回体检
+                                                * [0A,17,06/15,raw_code,0,0] */
+            uint8_t code = (uint8_t)update_probe();
+
+            r[0] = 0x0Au; r[1] = 0x17u;
+            r[2] = (uint8_t)(code == 0u ? 0x06u : 0x15u);
+            r[3] = code;
+            r[4] = 0u;
+            r[5] = 0u;
+            usb_write(r, 6);
+            return;
+        }
+        if (sub == 0x18u) {                    /* 把槽 N 的图画到 (x, y)：
+                                                * 帧 [0A,18,kind,idx,x,y]，x/y 是有符号 int8，
+                                                * 允许负偏移/裁剪；回 [0A,18,06/15,0,0,0] */
+            int bx = (int)(int8_t)f[4];
+            int by = (int)(int8_t)f[5];
+            uint8_t ok;
+
+            lcd_raw_idle();               /* 先抬屏 CS：asset_blit 里要读 NOR */
+            standby_mode = 0u;            /* 画上去的图别被待机动画一秒后盖掉 */
+            blink_first = 0u;
+            ok = (uint8_t)(asset_blit(f[2], f[3], bx, by) ? 0x06u : 0x15u);
+            r[0] = 0x0Au; r[1] = 0x18u; r[2] = ok;
+            r[3] = 0u; r[4] = 0u; r[5] = 0u;
+            usb_write(r, 6);
             return;
         }
         if (sub == 0x12u) {                    /* 免拆自更新：begin（01）/ 一窗数据（02） */
@@ -1009,7 +1166,7 @@ static void handle_frame(const uint8_t *f)
 
     if (cls == 0x08u) {
         uint8_t reply[6];
-        uint16_t v = adc_read(f[1]);                            /* ADC 尚未接入 */
+        uint16_t v = adc_filtered(f[1]);        /* 3 取中值 + 8 LSB 滞回，见上面说明 */
         reply[0] = 0x08;
         reply[1] = f[1];
         reply[2] = 0;
@@ -1199,46 +1356,38 @@ int main(void)
                 iwdg_feed(), delay_ms(1);
         }
 
-        /* 待机画面：正中 8x8 方块，白/黄每秒交替一次。主机一开流就停，
-         * 免得它跟画面抢窗口。
+        /* 待机动画：四角 8x8 方块白/黄交替、图片轮播、弹球都在这里推进。
          *
-         * 计时不用 SysTick（它的计数方向/分频都不直观，之前算出过纯白），
-         * 而是老老实实数 1000 个 delay_ms(1)：delay_ms 是实测标定的
-         * “3000 次空循环约 1 ms”，一秒很稳。等待期间照样喂狗、照样收字节，
-         * 一有数据立刻结束等待回去处理协议，不会漏包。 */
+         * 以前这里是 for (i = 0; i < 600; i++) { ... delay_ms(1); }，等于把
+         * 主循环钉死最多 1 秒（图片模式能达到整段停留时间）：这一秒里 USB
+         * 收字节只能在循环里蹭一下，命令要等一整秒才处理。现在改成状态机——
+         * 主循环每转一圈给 standby_wait 加一拍，攒够 STANDBY_BLINK_TICKS
+         * （≈1 秒）才翻色/换图，全程不阻塞；这一圈收到字节就跳过，和原来
+         * “rx_len == 0 才 tick”的行为一致。 */
         if (standby_mode) {
-            uint32_t i;
-
             if (blink_first) {
                 blink_first = 0u;
+                standby_wait = 0u;
                 standby_draw();
-            } else {
-                uint32_t ticks = 600u;
+            } else if (rx_len == 0) {
+                uint32_t need = STANDBY_BLINK_TICKS;
 
-                /* 图片轮播按设置的“每张停留秒数”，方块轮播固定 1 秒 */
+                /* 图片轮播按设置的“每张停留秒数”，方块轮播固定 1 秒，
+                 * 弹球 20 拍一步（空闲时 ≈20 ms，和原来一致） */
                 if (g_settings.standby_mode == 2u)
-                    ticks = (uint32_t)g_settings.dwell * 1000u;
+                    need = (uint32_t)g_settings.dwell * STANDBY_BLINK_TICKS;
                 else if (g_settings.standby_mode == 3u)
-                    ticks = 20u;        /* 弹球：约 20 ms 一步，50 步/秒 */
+                    need = 20u;
 
-                for (i = 0u; i < ticks; i++) {
-                    iwdg_feed();
-                    n = usb_read(rx + rx_len, (int)sizeof(rx) - rx_len);
-                    if (n > 0) {
-                        rx_len += n;
-                        quiet = 0u;
-                        hello_tick = 0u;
-                        stall = 0u;
-                        break;
-                    }
-                    /* 待机时主循环几乎不转，打招呼的快计数器涨不起来，
-                     * 主机就会“找不到设备”。这里每约 100 拍补一次 hello。 */
-                    if ((i % 50u) == 0u)
-                        usb_write(hello, 6);
-                    delay_ms(1);
-                }
-                if (rx_len == 0)
+                standby_wait++;
+                /* 待机时主循环几乎不转、打招呼的快计数器涨不起来，主机就会
+                 * “找不到设备”。照旧每约 50 拍补一次 hello。 */
+                if ((standby_wait % 50u) == 0u)
+                    usb_write(hello, 6);
+                if (standby_wait >= need) {
+                    standby_wait = 0u;
                     standby_tick();
+                }
             }
         }
 
@@ -1262,12 +1411,20 @@ int main(void)
             asset_idle = 0u;
         }
 
-        if (up_rx_on) {               /* half-open window: give up after a while */
+        /* OTA 上传窗口半开（0A 12 02 声明了 1 KB，字节却没来齐）：主循环空闲
+         * 时一圈 ≈ 1 ms，UP_IDLE_LIMIT = 400 圈 ≈ 0.4 秒就作废，比原来的
+         * 4 000 000 圈（≈1 小时）快三个数量级。作废时清状态并回一个
+         * [0A,12,15,00,00,00]，主机能看到“这窗废了”，设备也不会把随后到的
+         * 命令当成图像数据吃掉。 */
+        if (up_rx_on) {
             if (rx_len == 0) {
-                if (++up_idle > 4000000u) {
+                if (++up_idle > UP_IDLE_LIMIT) {
+                    static const uint8_t up_abort[6] = {0x0Au, 0x12u, 0x15u, 0u, 0u, 0u};
+
                     up_rx_on = 0u;
                     up_rx_left = 0u;
                     up_idle = 0u;
+                    usb_write(up_abort, 6);
                 }
             } else {
                 up_idle = 0u;
