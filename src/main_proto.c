@@ -364,7 +364,7 @@ static void ball_step(void)
 /* 画待机画面：黑屏 / 四角方块 / 图片轮播 / Ping-Pong */
 
 /* 轮播上限：standby_count 有效（1..STANDBY_SLOTS）时只在前 N 个槽里循环；
- * 协议与存档都钳过，这里是内存值的兜底：异常值退回全部槽重画。 */
+ * 协议与存档都钳过，这里按内存值处理：异常值退回全部槽重画。 */
 static uint8_t standby_limit(void)
 {
     if (g_settings.standby_count >= 1u && g_settings.standby_count <= STANDBY_SLOTS)

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* hexfix.js - 把 objcopy 生成的 Intel HEX 整理成 WCHISPStudio 能吃的样子。
  *
- * 两个坑：
+ * 两个问题：
 
    1. objcopy 遇到段间对齐空洞时会开新记录、跳过空洞，HEX 里就出现地址不连续。
       WCHISPStudio 对此比较敏感（表现为"hex 转 bin 失败"或刷进去不启动）。
