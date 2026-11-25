@@ -1,4 +1,4 @@
-# MSU2_MINI 固件
+# MSU2_MINI 开源固件
 
 这是一块 0.96 英寸彩色屏桌面终端的独立固件实现。原厂固件功能封闭、没有公开协议，本仓库从零实现了完整的显示、资产存储、免拆自更新和触摸上报，并配套一套串口协议，供上位机（[Open_MSU2_MINI_Console](https://github.com/hsushjk/Open_MSU2_MINI_Console)）驱动。
 
