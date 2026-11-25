@@ -1352,9 +1352,19 @@ int main(void)
      * 而不是停在原地变成"USB 能枚举、但永远不说话"的哑巴。 */
     iwdg_start();
     iwdg_feed();
+
+    /* USB 先起、上电立刻打招呼：即使后面屏幕初始化或画面卡住，上位机也能
+     * 连上并读到版本与面包屑，而不是整机"能枚举、一个字节都不说"。 */
+    adc_init();
+    usb_init();
+    usb_write(hello, 6);
+    usb_write(hello, 6);
+    TRACE_STAGE(2u);
+
     lcd_gpio_init();
     lcd_init();
     lcd_fill(0, 0, 160, 80, 0x0000);
+    iwdg_feed();
 
     {
         /* 开机自检：结果既画在屏上（boot_mode==2），也存进 g_boot_report 供上位机查 */
@@ -1365,10 +1375,6 @@ int main(void)
         uint8_t passed;
 
         cfg_ok = settings_load(&g_settings);
-
-        adc_init();      /* 先把 ADC 弄好，免得刚枚举完就被阻住 */
-        usb_init();
-        TRACE_STAGE(2u);
 
         flash_read_id(id);
         if (id[0] == 0x85u && id[1] == 0x60u && id[2] == 0x14u)
@@ -1401,6 +1407,8 @@ int main(void)
             boot_screen_done(passed, 5u);
             while (ms > 0u) {
                 iwdg_feed();
+                if ((ms % 200u) == 0u)
+                    usb_write(hello, 6);     /* 画自检画面期间也别让上位机干等 */
                 delay_ms(1);
                 ms--;
             }
