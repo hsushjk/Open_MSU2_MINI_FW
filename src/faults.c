@@ -47,6 +47,10 @@ void __attribute__((interrupt("machine"))) trap_handler(void)
     if (cause & 0x10u)
         lcd_fill(18, 2, 12, 12, 0xF81F);  /* 码值的第 4 位 */
 
+    /* 画完别停在原地：开机早期看门狗还没起来，停在这里就是永久哑巴。
+     * 等 1.2 秒让颜色能被看见，然后跳回 0x0 重新走 crt0（等价软复位）。 */
+    delay_ms(1200);
+    ((void (*)(void))0u)();
     for (;;)
         ;
 }

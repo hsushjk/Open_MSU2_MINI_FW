@@ -1348,6 +1348,10 @@ int main(void)
 
     RCC->APB2PCENR |= RCC_APB2_GPIOA | RCC_APB2_GPIOB | RCC_APB2_GPIOC | RCC_APB2_AFIO;
     board_clock_init();
+    /* 看门狗尽早起来：开机画面/资产/自检任何一步卡住都能自己复位，
+     * 而不是停在原地变成"USB 能枚举、但永远不说话"的哑巴。 */
+    iwdg_start();
+    iwdg_feed();
     lcd_gpio_init();
     lcd_init();
     lcd_fill(0, 0, 160, 80, 0x0000);
@@ -1431,8 +1435,6 @@ int main(void)
         c[5] = 0xAAu;
         usb_write(c, 6);
     }
-
-    iwdg_start();
 
     for (;;) {
         iwdg_feed();
@@ -1786,10 +1788,10 @@ int main(void)
 
         if (hb_hold > 0u) {
             hb_hold--;
-        } else if (++quiet >= 120000u) {
+        } else if (++quiet >= 200u) {
             if (hello_tick == 0u)
                 usb_write(hello, 6);
-            if (++hello_tick >= 15000u)
+            if (++hello_tick >= 200u)
                 hello_tick = 0u;
         }
 
