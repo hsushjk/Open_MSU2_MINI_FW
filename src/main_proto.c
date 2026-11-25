@@ -498,7 +498,7 @@ static void standby_fade_step(void)
     iwdg_feed();                    /* 单带 3–10 ms，远短于 IWDG 周期 */
     /* 淡入期间 standby_wait 不涨，主循环里那条 hello 就永远轮不到；
      * 主机恰好此时打开串口会等不到问候包。每 8 条带子补一次。 */
-    if ((fade_band & 7u) == 0u)
+    if (cfg_selected != 0u && (fade_band & 7u) == 0u)
         usb_write(hello, 6);
 
     if (++fade_band < FADE_BANDS)
@@ -1357,8 +1357,21 @@ int main(void)
      * 连上并读到版本与面包屑，而不是整机"能枚举、一个字节都不说"。 */
     adc_init();
     usb_init();
-    usb_write(hello, 6);
-    usb_write(hello, 6);
+    {
+        /* 等主机完成 SET_CONFIGURATION 再打招呼：设备在配置完成之前装 EP3，
+         * 会把端点的"忙"标志永久挂住，之后一个字节都发不出去
+         * （实测症状：能枚举、屏幕在动、串口 0 字节）。 */
+        uint32_t wait = 400u;
+
+        while (wait > 0u && cfg_selected == 0u) {
+            delay_ms(1);
+            wait--;
+        }
+        if (cfg_selected != 0u) {
+            usb_write(hello, 6);
+            usb_write(hello, 6);
+        }
+    }
     TRACE_STAGE(2u);
 
     lcd_gpio_init();
@@ -1407,7 +1420,7 @@ int main(void)
             boot_screen_done(passed, 5u);
             while (ms > 0u) {
                 iwdg_feed();
-                if ((ms % 200u) == 0u)
+                if (cfg_selected != 0u && (ms % 200u) == 0u)
                     usb_write(hello, 6);     /* 画自检画面期间也别让上位机干等 */
                 delay_ms(1);
                 ms--;
@@ -1561,7 +1574,7 @@ int main(void)
                 standby_wait++;
                 /* 待机时主循环几乎不转、打招呼的快计数器涨不起来，主机就会
                  * “找不到设备”。照旧每约 50 拍补一次 hello。 */
-                if ((standby_wait % 50u) == 0u)
+                if (cfg_selected != 0u && (standby_wait % 50u) == 0u)
                     usb_write(hello, 6);
                 if (standby_wait >= need) {
                     standby_wait = 0u;
@@ -1797,7 +1810,7 @@ int main(void)
         if (hb_hold > 0u) {
             hb_hold--;
         } else if (++quiet >= 200u) {
-            if (hello_tick == 0u)
+            if (cfg_selected != 0u && hello_tick == 0u)
                 usb_write(hello, 6);
             if (++hello_tick >= 200u)
                 hello_tick = 0u;

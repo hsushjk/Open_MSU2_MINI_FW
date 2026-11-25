@@ -42,7 +42,7 @@ static const uint8_t usb_string_1[10] = {
  * 不依赖串口回包（设备哑的时候也能核对）。 */
 static const uint8_t usb_string_2[22] = {
     0x16, 0x03,
-    'M', 0, 'S', 0, 'U', 0, '2', 0, '_', 0, 'M', 0, 'I', 0, 'N', 0, 'I', 0, '2', 0
+    'M', 0, 'S', 0, 'U', 0, '2', 0, '_', 0, 'M', 0, 'I', 0, 'N', 0, 'I', 0, '3', 0
 };
 
 static const uint8_t usb_string_3[26] = {

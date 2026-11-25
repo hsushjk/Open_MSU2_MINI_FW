@@ -93,6 +93,8 @@ volatile uint32_t usb_rx_stall;
 volatile uint32_t usb_other_count;
 
 volatile uint8_t ep3_busy;
+static uint16_t ep3_busy_calls;   /* usb_write 连续落空的次数：超了就把 EP3 重来 */
+static uint8_t ep3_tog;           /* 数据翻转位：复位后必须与硬件重新对齐 */
 int usb_irq_enable = 1;
 
 void usb_gpio_init(void);
@@ -342,6 +344,12 @@ void usb_service(void)
             ep0_ptr = 0;
             ep0_left = 0;
             usb_endpoints_setup();
+            /* 端点被重新初始化了：软件里的忙标志和翻转位也要跟着归零，
+             * 否则会一直以为 EP3 还在发上一笔，之后一个字节都发不出去。 */
+            ep3_busy = 0u;
+            ep3_pending_len = 0u;
+            ep3_tog = 0u;
+            ep3_busy_calls = 0u;
             USB->INT_EN = 0x07u;
         }
         if ((int_fg & INT_FG_SUSPEND) != 0u) {
@@ -367,6 +375,7 @@ void usb_service(void)
         usb_in_count++;
         if ((int_st & 0x07u) == 3u) {
             ep3_busy = 0u;              /* EP3 这一笔已被主机取走 */
+            ep3_busy_calls = 0u;
             if (ep3_pending_len != 0u) {
                 uint16_t n = ep3_pending_len;
 
@@ -443,7 +452,6 @@ int usb_read(uint8_t *dst, int max)
  * 只能在一笔已经完成（ep3_busy == 0）或刚清掉 busy 时调用。 */
 static void ep3_start(const uint8_t *src, int len)
 {
-    static uint8_t tog;
     int i;
 
     for (i = 0; i < len; i++)
@@ -451,8 +459,8 @@ static void ep3_start(const uint8_t *src, int len)
     *(volatile uint32_t *)0x4002341Cu = (uint32_t)(unsigned long)ep3_buf;
     *(volatile uint16_t *)0x4002342Cu = (uint16_t)len;
     /* ACK 位、bit6 数据翻转，每一笔交替，不能写死 */
-    *(volatile uint8_t  *)0x4002342Eu = tog ? 0x40u : 0x00u;
-    tog = (uint8_t)(tog ^ 1u);
+    *(volatile uint8_t  *)0x4002342Eu = ep3_tog ? 0x40u : 0x00u;
+    ep3_tog = (uint8_t)(ep3_tog ^ 1u);
 }
 
 /* 发一笔到 EP3 IN。忙的时候不覆盖正在发送的那一块，而是暂存到待发槽，
@@ -467,12 +475,23 @@ int usb_write(const uint8_t *src, int len)
         len = 64;
 
     if (ep3_busy) {
-        for (i = 0; i < len; i++)
-            ep3_pending[i] = src[i];
-        ep3_pending_len = (uint16_t)len;
-        return len;
+        /* 端点被长期占住（配置完成之前就装过一笔、或主机中途走了）：
+         * 超过阈值就复位 EP3 重来，否则会永久哑掉。 */
+        if (++ep3_busy_calls > 2000u) {
+            ep3_busy_calls = 0u;
+            ep3_busy = 0u;
+            ep3_pending_len = 0u;
+            ep3_tog = 0u;
+            USB->UEP3_CTRL = 0x00020000u;
+        } else {
+            for (i = 0; i < len; i++)
+                ep3_pending[i] = src[i];
+            ep3_pending_len = (uint16_t)len;
+            return len;
+        }
     }
 
+    ep3_busy_calls = 0u;
     ep3_busy = 1u;
     ep3_start(src, len);
     return len;
