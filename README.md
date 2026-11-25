@@ -2,8 +2,6 @@
 
 这是一块 0.96 英寸彩色屏桌面终端的独立固件实现。原厂固件功能封闭、没有公开协议，本仓库从零实现了完整的显示、资产存储、免拆自更新和触摸上报，并配套一套串口协议，供上位机（[Open_MSU2_MINI_Console](https://github.com/hsushjk/Open_MSU2_MINI_Console)）驱动。
 
-当前版本 **1.0.9**，对应硬件标识 `MSU2M-24Q3`。
-
 ## 硬件
 
 | 项目 | 参数 |
@@ -54,14 +52,18 @@ link.ld            链接脚本
 
 ## 构建
 
-需要 RISC-V 工具链（xpack `riscv-none-elf-gcc` 14.2 及以上），默认路径可用环境变量 `RISCV_TOOLCHAIN` 覆盖：
+需要 RISC-V 工具链（xpack `riscv-none-elf-gcc` 14.2 及以上）和 Node.js（`tools/hexfix.js` 用到）。`build.ps1` 在 Windows、Linux、macOS 上都能运行（用 `pwsh`）。
+
+工具链按以下顺序查找：`-Toolchain` 参数 → 环境变量 `RISCV_TOOLCHAIN` → Windows 上的默认安装路径 → `PATH` 里的 `riscv-none-elf-gcc`。只需要指定工具链的 `bin` 目录：
 
 ```powershell
-$env:RISCV_TOOLCHAIN = "C:\path\to\riscv-none-elf-gcc\bin"
-.\build.ps1
+$env:RISCV_TOOLCHAIN = "/path/to/xpack-riscv-none-elf-gcc-14.2.0-3/bin"
+pwsh ./build.ps1
 ```
 
-产物在 `build\` 下：`msu2_proto_fw.elf`、`msu2_proto_fw.bin`、`msu2_proto_fw.hex`。编译选项为 `-march=rv32imac_zicsr -mabi=ilp32 -Os`，当前镜像约 20 KB 代码、14 KB 静态内存。
+产物在 `build/` 下：`firmware.elf`、`msu2_proto_fw.bin`、`msu2_proto_fw.hex`。编译选项为 `-march=rv32imac_zicsr -mabi=ilp32 -Os`，当前镜像约 20 KB 代码、14 KB 静态内存。
+
+`.github/workflows/build.yml` 会在每次提交和拉取请求时用官方 xpack 工具链构建，产物作为 artifact 上传；打 `v*` 标签时会校验 `src/fw.h` 里的版本号并创建 Release。
 
 ## 刷写
 
@@ -192,12 +194,6 @@ python msu2_mini.py --port <串口> --flash build\msu2_proto_fw.hex
 - 触摸只上报原始 ADC 值，没有硬件滤波，阈值与手势由上位机判定。
 - 推流速率受设备主循环按 64 字节一包消费的限制，整帧上限约 10 fps。
 - 屏与 NOR 共用 PA6，任何 NOR 访问都会打断正在进行的屏流。
-
-## 相关仓库
-
-- [Open_MSU2_MINI](https://github.com/hsushjk/Open_MSU2_MINI)：硬件说明、引脚、原理图与协议文档
-- [Open_MSU2_MINI_Console](https://github.com/hsushjk/Open_MSU2_MINI_Console)：上位机与插件
-- [MSU2_MINI_FW_Reverse](https://github.com/hsushjk/MSU2_MINI_FW_Reverse)：原厂固件的反编译记录
 
 ## 许可
 
